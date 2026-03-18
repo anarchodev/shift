@@ -261,6 +261,7 @@ shift_result_t shift_collection_register(shift_t                       *ctx,
   col->component_count = (uint32_t)info->comp_count;
   col->on_enter        = info->on_enter;
   col->on_leave        = info->on_leave;
+  col->max_capacity    = info->max_capacity;
 
   col->component_ids =
       salloc(ctx, sizeof(shift_component_id_t) * info->comp_count);
@@ -321,10 +322,17 @@ static shift_result_t col_grow(shift_t *ctx, shift_collection_entry_t *col,
   if (col->capacity >= needed)
     return shift_ok;
 
-  size_t new_cap = col->capacity == 0 ? 8 : col->capacity;
-  while (new_cap < needed)
-    new_cap *= 2;
-
+  size_t new_cap;
+  if (col->max_capacity) {
+    if (needed > col->max_capacity) {
+      return shift_error_oom;
+    }
+    new_cap = col->max_capacity;
+  } else {
+    new_cap = col->capacity == 0 ? 8 : col->capacity;
+    while (new_cap < needed)
+      new_cap *= 2;
+  }
   shift_entity_t *new_eids =
       srealloc(ctx, col->entity_ids, sizeof(shift_entity_t) * new_cap);
   if (!new_eids)

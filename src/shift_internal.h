@@ -62,6 +62,7 @@ typedef struct {
 typedef struct {
   size_t                count;
   size_t                capacity;
+  size_t                max_capacity;
   uint32_t              component_count;
   shift_component_id_t *component_ids; /* owned array */
   void                **columns;       /* one void* per component (owned) */

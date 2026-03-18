@@ -91,6 +91,7 @@ shift_result_t shift_component_register(shift_t                      *ctx,
 typedef struct {
   const shift_component_id_t *comp_ids;
   size_t                      comp_count;
+  size_t                      max_capacity; /* leave 0 for dynamic */
   void (*on_enter)(shift_t *ctx, const shift_entity_t *entities,
                    uint32_t count); /* called after entities are placed */
   void (*on_leave)(shift_t *ctx, const shift_entity_t *entities,
