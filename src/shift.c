@@ -313,7 +313,7 @@ shift_result_t
 shift_collection_get_component_array(shift_t *ctx, shift_collection_id_t col_id,
                                      shift_component_id_t comp_id,
                                      void **out_array, size_t *out_count) {
-  if (!ctx || !out_array || !out_count)
+  if (!ctx || !out_array)
     return shift_error_null;
 
   shift_collection_entry_t *col = find_collection(ctx, col_id);
@@ -325,7 +325,24 @@ shift_collection_get_component_array(shift_t *ctx, shift_collection_id_t col_id,
     return shift_error_not_found;
 
   *out_array = col->columns[idx];
-  *out_count = col->count;
+  if (out_count)
+    *out_count = col->count;
+  return shift_ok;
+}
+
+shift_result_t
+shift_collection_get_entities(shift_t *ctx, shift_collection_id_t col_id,
+                               shift_entity_t **out_entities, size_t *out_count) {
+  if (!ctx || !out_entities)
+    return shift_error_null;
+
+  shift_collection_entry_t *col = find_collection(ctx, col_id);
+  if (!col)
+    return shift_error_not_found;
+
+  *out_entities = col->entity_ids;
+  if (out_count)
+    *out_count = col->count;
   return shift_ok;
 }
 

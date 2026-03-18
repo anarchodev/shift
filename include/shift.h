@@ -146,6 +146,10 @@ shift_collection_get_component_array(shift_t *ctx, shift_collection_id_t col_id,
                                      shift_component_id_t comp_id,
                                      void **out_array, size_t *out_count);
 
+shift_result_t
+shift_collection_get_entities(shift_t *ctx, shift_collection_id_t col_id,
+                               shift_entity_t **out_entities, size_t *out_count);
+
 /* --------------------------------------------------------------------------
  * Entity operations
  * -------------------------------------------------------------------------- */
