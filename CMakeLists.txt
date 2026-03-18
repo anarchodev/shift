@@ -7,6 +7,11 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 option(SHIFT_BUILD_TESTS "Build tests" ON)
 
+# Export compile_commands.json for debug builds
+if(CMAKE_BUILD_TYPE STREQUAL "Debug" OR NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
 # Sanitizer interface target
 add_library(shift_sanitizers INTERFACE)
 target_compile_options(shift_sanitizers INTERFACE
