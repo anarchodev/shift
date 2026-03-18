@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "shift.h"
+#include <stdlib.h>
 
 /* --------------------------------------------------------------------------
  * Test fixture helpers
@@ -1068,6 +1069,422 @@ void test_flush_noncontiguous_removes(void) {
 }
 
 /* --------------------------------------------------------------------------
+ * fixed_capacity tests
+ * -------------------------------------------------------------------------- */
+
+static int  g_realloc_count = 0;
+static void *counted_realloc(void *ptr, size_t size, void *user_ctx) {
+  (void)user_ctx;
+  g_realloc_count++;
+  return realloc(ptr, size);
+}
+static void *plain_alloc(size_t size, void *user_ctx) {
+  (void)user_ctx;
+  return malloc(size);
+}
+static void plain_free(void *ptr, void *user_ctx) {
+  (void)user_ctx;
+  free(ptr);
+}
+
+void test_fixed_capacity_basic(void) {
+  /* A collection with max_capacity=4 holds up to 4 entities without error. */
+  shift_t *ctx = make_ctx();
+
+  shift_component_id_t comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(
+                                      ctx, &(shift_component_info_t){
+                                               .element_size = sizeof(uint32_t)},
+                                      &comp_id));
+
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_register(
+                            ctx,
+                            &(shift_collection_info_t){.comp_ids    = &comp_id,
+                                                       .comp_count  = 1,
+                                                       .max_capacity = 4},
+                            &col_id));
+
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create(ctx, 4, col_id, &ep));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  void  *arr   = NULL;
+  size_t count = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_get_component_array(
+                                      ctx, col_id, comp_id, &arr, &count));
+  TEST_ASSERT_EQUAL_size_t(4, count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_fixed_capacity_overflow(void) {
+  /* Moving more entities into a fixed-capacity collection than it can hold
+   * returns shift_error_full during flush. */
+  shift_t *ctx = make_ctx();
+
+  shift_component_id_t comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(
+                                      ctx, &(shift_component_info_t){
+                                               .element_size = sizeof(uint32_t)},
+                                      &comp_id));
+
+  shift_collection_id_t src_id, dst_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &src_id));
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(ctx,
+                                &(shift_collection_info_t){.comp_ids     = &comp_id,
+                                                           .comp_count   = 1,
+                                                           .max_capacity = 2},
+                                &dst_id));
+
+  /* Place 3 entities in src, then try to move all 3 into a capacity-2 dest. */
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create(ctx, 3, src_id, &ep));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  shift_entity_t batch[3] = {ep[0], ep[1], ep[2]};
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_move(ctx, batch, 3, dst_id));
+  TEST_ASSERT_EQUAL_INT(shift_error_full, shift_flush(ctx));
+
+  shift_context_destroy(ctx);
+}
+
+void test_fixed_capacity_eager_alloc(void) {
+  /* With max_capacity set, storage must be allocated at registration time.
+   * We verify this by counting srealloc calls (which col_grow uses):
+   *   - 2 reallocs during register (entity_ids + 1 column)
+   *   - 1 realloc during flush (migration_recipe array), NOT 3
+   *     (which would indicate a lazy col_grow inside the flush path). */
+  g_realloc_count = 0;
+  shift_config_t cfg = {
+      .max_entities            = 64,
+      .max_components          = 8,
+      .max_collections         = 8,
+      .deferred_queue_capacity = 32,
+      .allocator               = {.alloc   = plain_alloc,
+                                  .realloc = counted_realloc,
+                                  .free    = plain_free},
+  };
+  shift_t *ctx = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_context_create(&cfg, &ctx));
+
+  shift_component_id_t comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(
+                                      ctx, &(shift_component_info_t){
+                                               .element_size = sizeof(uint32_t)},
+                                      &comp_id));
+
+  int before_register = g_realloc_count;
+
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(ctx,
+                                &(shift_collection_info_t){.comp_ids     = &comp_id,
+                                                           .comp_count   = 1,
+                                                           .max_capacity = 4},
+                                &col_id));
+
+  /* Eager: entity_ids (1 realloc) + columns[0] (1 realloc) = 2 new reallocs */
+  TEST_ASSERT_EQUAL_INT(before_register + 2, g_realloc_count);
+
+  int after_register = g_realloc_count;
+
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create(ctx, 4, col_id, &ep));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Only the migration_recipe array growth should have realloc'd during flush,
+   * not entity_ids or columns (capacity was already sufficient). */
+  TEST_ASSERT_EQUAL_INT(after_register + 1, g_realloc_count);
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * Bug regression tests
+ * -------------------------------------------------------------------------- */
+
+void test_recipe_cache_no_dangling_ptr(void) {
+  /* Regression for bug 1: shift_batch_t.recipe dangling pointer after realloc.
+   *
+   * Create 10 source collections and 1 destination, then in a single flush
+   * move one entity from each source to the destination.  This produces 10
+   * distinct (src,dst) recipe pairs — more than the initial capacity of 8 —
+   * which forces a migration_recipes realloc mid-flush.  If batch.recipe is a
+   * raw pointer it becomes dangling after the realloc; the index-based fix
+   * must survive this without corruption or crash. */
+  shift_config_t cfg = {
+      .max_entities            = 64,
+      .max_components          = 4,
+      .max_collections         = 12,
+      .deferred_queue_capacity = 32,
+      .allocator               = {0},
+  };
+  shift_t *ctx = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_context_create(&cfg, &ctx));
+
+  shift_component_id_t comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(
+                            ctx,
+                            &(shift_component_info_t){.element_size =
+                                                          sizeof(uint32_t)},
+                            &comp_id));
+
+  /* Register 10 source collections and 1 destination, all with comp_id. */
+  shift_collection_id_t src_ids[10], dst_id;
+  for (int s = 0; s < 10; s++) {
+    TEST_ASSERT_EQUAL_INT(
+        shift_ok,
+        shift_collection_register(
+            ctx,
+            &(shift_collection_info_t){.comp_ids   = &comp_id,
+                                       .comp_count = 1},
+            &src_ids[s]));
+  }
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &dst_id));
+
+  /* Create one entity per source collection and flush them into the sources. */
+  shift_entity_t entities[10];
+  for (int s = 0; s < 10; s++) {
+    shift_entity_t *ep;
+    TEST_ASSERT_EQUAL_INT(shift_ok,
+                          shift_entity_create(ctx, 1, src_ids[s], &ep));
+    entities[s] = ep[0];
+  }
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Queue a move from each distinct source to the shared destination. */
+  for (int s = 0; s < 10; s++) {
+    TEST_ASSERT_EQUAL_INT(shift_ok,
+                          shift_entity_move_one(ctx, entities[s], dst_id));
+  }
+
+  /* This flush must encounter 10 distinct (src,dst) recipes, triggering a
+   * migration_recipes realloc.  Must not crash or produce wrong results. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* All 10 entities must be in the destination. */
+  void  *arr   = NULL;
+  size_t count = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_get_component_array(
+                                      ctx, dst_id, comp_id, &arr, &count));
+  TEST_ASSERT_EQUAL_size_t(10, count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_flush_error_state_reset(void) {
+  /* Regression for bug 2: flush leaves corrupted state on error.
+   *
+   * After a flush that fails with shift_error_full, a subsequent flush call
+   * (with no new operations) must return shift_ok and not crash.  Entities
+   * whose move was dropped must have has_pending_move cleared (i.e.
+   * shift_entity_is_moving returns false) and must still be accessible in
+   * their original source collection. */
+  shift_t *ctx = make_ctx();
+
+  shift_component_id_t comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(
+                            ctx,
+                            &(shift_component_info_t){.element_size =
+                                                          sizeof(uint32_t)},
+                            &comp_id));
+
+  shift_collection_id_t src_id, dst_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &src_id));
+  /* cap-2 destination — cannot hold 3 entities */
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids     = &comp_id,
+                                     .comp_count   = 1,
+                                     .max_capacity = 2},
+          &dst_id));
+
+  /* Place 3 entities in src. */
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create(ctx, 3, src_id, &ep));
+  shift_entity_t e0 = ep[0], e1 = ep[1], e2 = ep[2];
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Queue a move of all 3 into the cap-2 destination. */
+  shift_entity_t batch[3] = {e0, e1, e2};
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_move(ctx, batch, 3, dst_id));
+  TEST_ASSERT_EQUAL_INT(shift_error_full, shift_flush(ctx));
+
+  /* A second flush with no new ops must succeed. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* The 3 entities must no longer be marked as moving. */
+  TEST_ASSERT_FALSE(shift_entity_is_moving(ctx, e0));
+  TEST_ASSERT_FALSE(shift_entity_is_moving(ctx, e1));
+  TEST_ASSERT_FALSE(shift_entity_is_moving(ctx, e2));
+
+  /* They must still be accessible in their original source collection. */
+  void  *arr   = NULL;
+  size_t count = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_get_component_array(
+                                      ctx, src_id, comp_id, &arr, &count));
+  TEST_ASSERT_EQUAL_size_t(3, count);
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * New correctness tests (from code review)
+ * -------------------------------------------------------------------------- */
+
+void test_entity_move_batch_partial_stale_no_side_effects(void) {
+  /* 3 live entities + stale at index 1; shift_entity_move must return
+   * shift_error_stale and leave no partial state — none of the live entities
+   * should have has_pending_move set, and a subsequent flush must succeed. */
+  shift_t *ctx = make_ctx();
+
+  shift_component_info_t info = {.element_size = sizeof(uint32_t)};
+  shift_component_id_t   comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+  shift_collection_id_t col_src, col_dst;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_src));
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_dst));
+
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create(ctx, 3, col_src, &ep));
+  shift_entity_t e0 = ep[0], e1 = ep[1], e2 = ep[2];
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  shift_entity_t stale    = {.index = 0, .generation = 99};
+  shift_entity_t batch[4] = {e0, stale, e1, e2};
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_move(ctx, batch, 4, col_dst));
+
+  /* No partial state: none of the live entities should be marked moving. */
+  TEST_ASSERT_FALSE(shift_entity_is_moving(ctx, e0));
+  TEST_ASSERT_FALSE(shift_entity_is_moving(ctx, e1));
+  TEST_ASSERT_FALSE(shift_entity_is_moving(ctx, e2));
+
+  /* A subsequent no-op flush must succeed. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  shift_context_destroy(ctx);
+}
+
+static uint32_t g_on_leave_recorded_value;
+
+static void on_leave_reads_component(shift_t              *ctx,
+                                     const shift_entity_t *entities,
+                                     uint32_t              count) {
+  TEST_ASSERT_EQUAL_UINT32(1, count);
+  shift_component_id_t comp_id = 0; /* only one component registered */
+  void                *ptr     = NULL;
+  shift_result_t       r = shift_entity_get_component(ctx, entities[0],
+                                                      comp_id, &ptr);
+  TEST_ASSERT_EQUAL_INT(shift_ok, r);
+  TEST_ASSERT_NOT_NULL(ptr);
+  g_on_leave_recorded_value = *(uint32_t *)ptr;
+}
+
+void test_on_leave_can_access_source_component(void) {
+  /* on_leave must be able to read the entity's source component via
+   * shift_entity_get_component — i.e. the entity must not appear stale or
+   * moving at the time the callback fires. */
+  shift_t *ctx = make_ctx();
+
+  shift_component_info_t info = {.element_size = sizeof(uint32_t)};
+  shift_component_id_t   comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+
+  shift_collection_info_t col_info = {
+      .comp_ids   = &comp_id,
+      .comp_count = 1,
+      .on_leave   = on_leave_reads_component,
+  };
+  shift_collection_id_t col_src;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_register(ctx, &col_info, &col_src));
+  shift_collection_id_t col_dst;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_dst));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_src, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Write a known value into the component. */
+  void *ptr = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_id, &ptr));
+  *(uint32_t *)ptr = 0xBEEF;
+
+  g_on_leave_recorded_value = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_move_one(ctx, e, col_dst));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_UINT32(0xBEEF, g_on_leave_recorded_value);
+
+  shift_context_destroy(ctx);
+}
+
+void test_collection_register_duplicate_component(void) {
+  /* Registering a collection with a duplicate component ID must return
+   * shift_error_invalid. */
+  shift_t *ctx = make_ctx();
+
+  shift_component_info_t info = {.element_size = sizeof(uint32_t)};
+  shift_component_id_t   comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+
+  shift_component_id_t  dup_comps[2] = {comp_id, comp_id};
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_error_invalid,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = dup_comps, .comp_count = 2},
+          &col_id));
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
  * Runner
  * -------------------------------------------------------------------------- */
 
@@ -1102,5 +1519,13 @@ int main(void) {
   RUN_TEST(test_move_batch_stale);
   RUN_TEST(test_move_batch_multi_source);
   RUN_TEST(test_flush_noncontiguous_removes);
+  RUN_TEST(test_fixed_capacity_basic);
+  RUN_TEST(test_fixed_capacity_overflow);
+  RUN_TEST(test_fixed_capacity_eager_alloc);
+  RUN_TEST(test_recipe_cache_no_dangling_ptr);
+  RUN_TEST(test_flush_error_state_reset);
+  RUN_TEST(test_entity_move_batch_partial_stale_no_side_effects);
+  RUN_TEST(test_on_leave_can_access_source_component);
+  RUN_TEST(test_collection_register_duplicate_component);
   return UNITY_END();
 }
