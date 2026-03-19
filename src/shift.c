@@ -438,24 +438,6 @@ static void col_remove_run(shift_t *ctx, shift_collection_entry_t *col,
  * Entity operations
  * -------------------------------------------------------------------------- */
 
-static shift_result_t shift_entity_reserve(shift_t *ctx, uint32_t count,
-                                           shift_entity_t **out_entities) {
-  assert(ctx && out_entities);
-  if (count == 0)
-    return shift_error_invalid;
-  if (ctx->collections[0].count - ctx->null_front < (size_t)count)
-    return shift_error_full;
-
-  *out_entities = &ctx->collections[0].entity_ids[ctx->null_front];
-  for (uint32_t i = 0; i < count; i++) {
-    shift_entity_t e = ctx->collections[0].entity_ids[ctx->null_front + i];
-    /* Entities in the unreserved null pool always have has_pending_move=false;
-     * this is an invariant, not a correction. */
-    assert(!ctx->metadata[e.index].has_pending_move);
-  }
-  ctx->null_front += count;
-  return shift_ok;
-}
 
 shift_result_t shift_entity_move(shift_t *ctx, const shift_entity_t *entities,
                                  uint32_t              count,
@@ -499,6 +481,7 @@ shift_result_t shift_entity_move(shift_t *ctx, const shift_entity_t *entities,
     } else {
       shift_deferred_op_t *op =
           &ctx->deferred_queue[ctx->deferred_queue_count++];
+      op->is_create   = false;
       op->src_col_id  = m->col_id;
       op->dest_col_id = dest_col_id;
       op->count       = 1;
@@ -527,10 +510,83 @@ shift_result_t shift_entity_create(shift_t *ctx, uint32_t count,
                                    shift_entity_t      **out_entities) {
   if (!ctx || !out_entities)
     return shift_error_null;
-  shift_result_t r = shift_entity_reserve(ctx, count, out_entities);
-  if (r != shift_ok)
-    return r;
-  return shift_entity_move(ctx, *out_entities, count, dest_col_id);
+  if (count == 0)
+    return shift_error_invalid;
+
+  shift_collection_entry_t *null_col = &ctx->collections[shift_null_col_id];
+  if (null_col->count - ctx->null_front < (size_t)count)
+    return shift_error_full;
+
+  shift_collection_entry_t *dest = find_collection(ctx, dest_col_id);
+  if (!dest)
+    return shift_error_not_found;
+
+  /* Check deferred queue capacity before mutating any state.  Peek may allow
+   * extending the previous op instead of pushing a new one. */
+  uint32_t null_base = (uint32_t)ctx->null_front;
+  uint32_t dest_base = (uint32_t)dest->count;
+  bool     can_peek  = (ctx->deferred_queue_count > 0 &&
+                    ctx->deferred_queue[ctx->deferred_queue_count - 1].is_create &&
+                    ctx->deferred_queue[ctx->deferred_queue_count - 1].dest_col_id ==
+                        dest_col_id &&
+                    ctx->deferred_queue[ctx->deferred_queue_count - 1].src_offset +
+                            ctx->deferred_queue[ctx->deferred_queue_count - 1].count ==
+                        null_base);
+
+  if (!can_peek && ctx->deferred_queue_count >= ctx->deferred_queue_capacity)
+    return shift_error_full;
+
+  /* Grow dest collection to hold count new entities. */
+  shift_result_t gr = col_grow(ctx, dest, dest->count + count);
+  if (gr != shift_ok)
+    return gr;
+
+  /* Zero-init new component slots (constructors called below). */
+  for (uint32_t c = 0; c < dest->component_count; c++) {
+    shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
+    memset((char *)dest->columns[c] + dest_base * ci->element_size, 0,
+           ci->element_size * count);
+  }
+
+  /* Transfer entities from null pool: place in dest, update metadata. */
+  for (uint32_t i = 0; i < count; i++) {
+    shift_entity_t    e = null_col->entity_ids[null_base + i];
+    shift_metadata_t *m = &ctx->metadata[e.index];
+    assert(!m->has_pending_move);
+    dest->entity_ids[dest_base + i] = e;
+    m->col_id = dest_col_id;
+    m->offset = dest_base + i;
+    /* has_pending_move stays false — entity is live immediately. */
+  }
+
+  ctx->null_front += count;
+  dest->count     += count;
+
+  /* Call constructors eagerly (batched over this create call). */
+  for (uint32_t c = 0; c < dest->component_count; c++) {
+    shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
+    if (ci->constructor)
+      ci->constructor((char *)dest->columns[c] + dest_base * ci->element_size,
+                      count);
+  }
+
+  /* Enqueue (or extend) a create op — only on_enter and null-pool cleanup are
+   * deferred to flush. src_offset holds the null-pool base for col_remove_run. */
+  if (can_peek) {
+    ctx->deferred_queue[ctx->deferred_queue_count - 1].count += count;
+  } else {
+    shift_deferred_op_t *op = &ctx->deferred_queue[ctx->deferred_queue_count++];
+    op->is_create   = true;
+    op->src_col_id  = shift_null_col_id;
+    op->dest_col_id = dest_col_id;
+    op->src_offset  = null_base;
+    op->count       = count;
+  }
+
+  /* Return pointer into dest's entity_ids — valid until the next col_grow on
+   * this collection (i.e. until the next create or flush that grows dest). */
+  *out_entities = &dest->entity_ids[dest_base];
+  return shift_ok;
 }
 
 shift_result_t shift_entity_create_one(shift_t              *ctx,
@@ -632,7 +688,11 @@ static inline void flush_batch(shift_t *ctx, shift_batch_t *b) {
  */
 static void flush_cleanup(shift_t *ctx, size_t unprocessed_count) {
   for (size_t j = 0; j < unprocessed_count; j++) {
-    shift_deferred_op_t      *op  = &ctx->deferred_queue[j];
+    shift_deferred_op_t *op = &ctx->deferred_queue[j];
+    /* Create ops place entities eagerly — nothing to undo, no has_pending_move
+     * was set. */
+    if (op->is_create)
+      continue;
     shift_collection_entry_t *src = find_collection(ctx, op->src_col_id);
     if (!src)
       continue;
@@ -778,6 +838,18 @@ shift_result_t shift_flush(shift_t *ctx) {
 
   for (size_t i = ctx->deferred_queue_count; i-- > 0;) {
     shift_deferred_op_t *op = &ctx->deferred_queue[i];
+
+    /* Create ops: entities are already placed in dest — just fire on_enter and
+     * compact the null pool. Constructors were called eagerly at create time. */
+    if (op->is_create) {
+      flush_batch(ctx, &batch);
+      shift_collection_entry_t *null_col = &ctx->collections[shift_null_col_id];
+      shift_collection_entry_t *dst      = find_collection(ctx, op->dest_col_id);
+      if (dst && dst->on_enter)
+        dst->on_enter(ctx, &null_col->entity_ids[op->src_offset], op->count);
+      col_remove_run(ctx, null_col, op->src_offset, op->count);
+      continue;
+    }
 
     shift_collection_entry_t *src = find_collection(ctx, op->src_col_id);
     shift_collection_entry_t *dst = find_collection(ctx, op->dest_col_id);

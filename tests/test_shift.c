@@ -209,6 +209,8 @@ void test_create_flush_get_component(void) {
 }
 
 void test_get_component_before_flush(void) {
+  /* Entities are live immediately after shift_entity_create — component data
+   * must be accessible and writable before shift_flush is called. */
   shift_t *ctx = make_ctx();
 
   shift_component_info_t info = {.element_size = sizeof(uint32_t)};
@@ -226,9 +228,20 @@ void test_get_component_before_flush(void) {
   shift_entity_t e;
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_id, &e));
 
+  /* Component is accessible before flush. */
   void *ptr = NULL;
-  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+  TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_entity_get_component(ctx, e, comp_id, &ptr));
+  TEST_ASSERT_NOT_NULL(ptr);
+
+  /* Writing before flush is reflected after flush. */
+  *(uint32_t *)ptr = 0xCAFE;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  void *ptr2 = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_id, &ptr2));
+  TEST_ASSERT_EQUAL_UINT32(0xCAFE, *(uint32_t *)ptr2);
 
   shift_context_destroy(ctx);
 }
@@ -1202,9 +1215,9 @@ void test_fixed_capacity_eager_alloc(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create(ctx, 4, col_id, &ep));
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
 
-  /* Only the migration_recipe array growth should have realloc'd during flush,
-   * not entity_ids or columns (capacity was already sufficient). */
-  TEST_ASSERT_EQUAL_INT(after_register + 1, g_realloc_count);
+  /* Eager create: col_grow is a no-op (capacity already sufficient) and create
+   * ops skip recipe lookup at flush — zero reallocs expected. */
+  TEST_ASSERT_EQUAL_INT(after_register + 0, g_realloc_count);
 
   shift_context_destroy(ctx);
 }
