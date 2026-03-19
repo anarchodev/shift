@@ -210,10 +210,11 @@ static inline bool shift_entity_is_moving(const shift_t *ctx,
 }
 
 static inline shift_result_t
-shift_entity_get_collection(const shift_t *ctx, shift_entity_t entity, shift_collection_id_t *id) {
+shift_entity_get_collection(const shift_t *ctx, shift_entity_t entity,
+                            shift_collection_id_t *id) {
   if (entity.index >= ctx->max_entities)
     return shift_error_invalid;
-  *id =   ctx->metadata[entity.index].col_id;
+  *id = ctx->metadata[entity.index].col_id;
 
   return shift_ok;
 }
