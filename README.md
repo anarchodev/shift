@@ -230,6 +230,51 @@ shift_result_t shift_flush(shift_t *ctx);
 
 Executes all queued operations in order: removes from source collections (calling `on_leave` / destructors), inserts into destination collections (calling constructors / `on_enter`). Consecutive contiguous operations targeting the same destination are merged into a single batch call.
 
+
+## Recommended Usage
+
+Collections are much more powerful than you think. For example I have found using a
+collection per state of my objects works wonderfully to represent huge numbers of
+objects that can be in one of many states. This initially seems like it wouldn't
+work well since these collections are modelled on ECS archtypes so people
+immediately think they are only for things you want to rip through all at once.
+
+They are certainly good for that, but they are also really good at representing
+state in state machines. Think about what it typically means to be in a particular
+state. Take this example:
+
+```
+typedef enum {
+  STATE1.
+  STATE2,
+  STATE3
+} state_t;
+
+struct thing {
+  state_t state;
+  foo_t*foo;
+  bar_t *bar;
+};
+```
+
+Ok quick which fields are valid for STATE1? foo? Nope, memory access violation. How
+about bar? Yes valid. How do you move to STATE2? just set state? Did you forget to
+allocate foo? Did you remember to free bar? You did? Hah! you just double freed bar!
+
+All that garbage goes away if you just used collections.
+
+But I just need a static array of things indexed by some id that I use to indirect
+to the right object. Oh? You mean like how you can use an entity ID to indirect
+into a collection?
+
+But I really do need a flag to tell me when a particular object is in the state I
+mean it! Oh, you mean like shift_entity_get_collection?
+
+Trust me. Try it.
+
+But I am writing a direct threaded interpreter of bytecode and every cycle counts!
+Ok, use the switch statement.
+
 ## Design notes
 
 - **SoA layout** — each component column is a contiguous `void *` array. Iterating a single component type has no stride overhead.
