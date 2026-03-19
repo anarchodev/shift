@@ -88,19 +88,19 @@ typedef struct {
 
 typedef struct shift_s {
   shift_allocator_t         allocator;
-  shift_metadata_t         *metadata;               /* [max_entities] */
+  shift_metadata_t         *metadata; /* [max_entities] */
   size_t                    max_entities;
   size_t                    null_front;
-  shift_component_info_t   *components;             /* [max_components] */
+  shift_component_info_t   *components; /* [max_components] */
   size_t                    max_components;
   uint32_t                  component_count;
-  shift_collection_entry_t *collections;            /* [max_collections] */
+  shift_collection_entry_t *collections; /* [max_collections] */
   size_t                    max_collections;
   size_t                    collection_count;
-  shift_deferred_op_t      *deferred_queue;         /* [deferred_queue_capacity] */
+  shift_deferred_op_t      *deferred_queue; /* [deferred_queue_capacity] */
   size_t                    deferred_queue_capacity;
   size_t                    deferred_queue_count;
-  uint32_t                 *max_src_offset;         /* [max_collections] */
+  uint32_t                 *max_src_offset; /* [max_collections] */
   bool                      needs_sort;
   shift_migration_recipe_t *migration_recipes;
   size_t                    migration_recipe_count;
@@ -146,9 +146,10 @@ shift_collection_get_component_array(shift_t *ctx, shift_collection_id_t col_id,
                                      shift_component_id_t comp_id,
                                      void **out_array, size_t *out_count);
 
-shift_result_t
-shift_collection_get_entities(shift_t *ctx, shift_collection_id_t col_id,
-                               shift_entity_t **out_entities, size_t *out_count);
+shift_result_t shift_collection_get_entities(shift_t              *ctx,
+                                             shift_collection_id_t col_id,
+                                             shift_entity_t      **out_entities,
+                                             size_t               *out_count);
 
 /* --------------------------------------------------------------------------
  * Entity operations
@@ -192,8 +193,8 @@ shift_result_t shift_flush(shift_t *ctx);
 
 /* Returns true if the handle's generation no longer matches — the entity has
  * been destroyed/recycled or was never valid. */
-static inline bool
-shift_entity_is_stale(const shift_t *ctx, shift_entity_t entity) {
+static inline bool shift_entity_is_stale(const shift_t *ctx,
+                                         shift_entity_t entity) {
   if (entity.index >= ctx->max_entities)
     return true;
   return ctx->metadata[entity.index].generation != entity.generation;
@@ -201,9 +202,18 @@ shift_entity_is_stale(const shift_t *ctx, shift_entity_t entity) {
 
 /* Returns true if a deferred move is queued for this entity. The entity is
  * alive but its destination is not yet committed. */
-static inline bool
-shift_entity_is_moving(const shift_t *ctx, shift_entity_t entity) {
+static inline bool shift_entity_is_moving(const shift_t *ctx,
+                                          shift_entity_t entity) {
   if (entity.index >= ctx->max_entities)
     return false;
   return ctx->metadata[entity.index].has_pending_move;
+}
+
+static inline shift_result_t
+shift_entity_get_collection(const shift_t *ctx, shift_entity_t entity, shift_collection_id_t *id) {
+  if (entity.index >= ctx->max_entities)
+    return shift_error_invalid;
+  *id =   ctx->metadata[entity.index].col_id;
+
+  return shift_ok;
 }
