@@ -241,14 +241,19 @@ static int            col_find_component_index(const shift_collection_entry_t *c
                                                shift_component_id_t            comp_id);
 static shift_result_t col_grow(shift_t *ctx, shift_collection_entry_t *col,
                                size_t needed);
+static void           col_remove_run(shift_t *ctx, shift_collection_entry_t *col,
+                                     uint32_t start_offset, uint32_t run_count);
+static shift_migration_recipe_t *
+find_or_create_recipe(shift_t *ctx, shift_collection_id_t src_col_id,
+                      shift_collection_id_t dst_col_id);
 
 shift_result_t shift_collection_register(shift_t                       *ctx,
                                          const shift_collection_info_t *info,
                                          shift_collection_id_t *out_id) {
-  if (!ctx || !info || !info->comp_ids || !out_id)
+  if (!ctx || !info || !out_id)
     return shift_error_null;
-  if (info->comp_count == 0)
-    return shift_error_invalid;
+  if (info->comp_count > 0 && !info->comp_ids)
+    return shift_error_null;
   if (ctx->collection_count >= ctx->max_collections)
     return shift_error_full;
 
@@ -266,40 +271,45 @@ shift_result_t shift_collection_register(shift_t                       *ctx,
   col->on_leave        = info->on_leave;
   col->max_capacity    = info->max_capacity;
 
-  col->component_ids =
-      salloc(ctx, sizeof(shift_component_id_t) * info->comp_count);
-  if (!col->component_ids)
-    return shift_error_oom;
-  memcpy(col->component_ids, info->comp_ids,
-         sizeof(shift_component_id_t) * info->comp_count);
-  qsort(col->component_ids, info->comp_count, sizeof(shift_component_id_t),
-        cmp_component_ids);
+  if (info->comp_count > 0) {
+    col->component_ids =
+        salloc(ctx, sizeof(shift_component_id_t) * info->comp_count);
+    if (!col->component_ids)
+      return shift_error_oom;
+    memcpy(col->component_ids, info->comp_ids,
+           sizeof(shift_component_id_t) * info->comp_count);
+    qsort(col->component_ids, info->comp_count, sizeof(shift_component_id_t),
+          cmp_component_ids);
 
-  /* Reject duplicate component IDs (adjacent after sort). */
-  for (size_t i = 1; i < info->comp_count; i++) {
-    if (col->component_ids[i] == col->component_ids[i - 1]) {
-      sfree(ctx, col->component_ids);
-      return shift_error_invalid;
+    /* Reject duplicate component IDs (adjacent after sort). */
+    for (size_t i = 1; i < info->comp_count; i++) {
+      if (col->component_ids[i] == col->component_ids[i - 1]) {
+        sfree(ctx, col->component_ids);
+        return shift_error_invalid;
+      }
     }
-  }
 
-  col->columns = salloc(ctx, sizeof(void *) * info->comp_count);
-  if (!col->columns) {
-    sfree(ctx, col->component_ids);
-    return shift_error_oom;
+    col->columns = salloc(ctx, sizeof(void *) * info->comp_count);
+    if (!col->columns) {
+      sfree(ctx, col->component_ids);
+      return shift_error_oom;
+    }
+    memset(col->columns, 0, sizeof(void *) * info->comp_count);
   }
-  memset(col->columns, 0, sizeof(void *) * info->comp_count);
 
   if (info->max_capacity > 0) {
     shift_result_t gr = col_grow(ctx, col, info->max_capacity);
     if (gr != shift_ok) {
       if (col->entity_ids)
         sfree(ctx, col->entity_ids);
-      for (uint32_t i = 0; i < col->component_count; i++)
-        if (col->columns[i])
-          sfree(ctx, col->columns[i]);
-      sfree(ctx, col->columns);
-      sfree(ctx, col->component_ids);
+      if (col->columns) {
+        for (uint32_t i = 0; i < col->component_count; i++)
+          if (col->columns[i])
+            sfree(ctx, col->columns[i]);
+        sfree(ctx, col->columns);
+      }
+      if (col->component_ids)
+        sfree(ctx, col->component_ids);
       return gr;
     }
   }
@@ -481,7 +491,6 @@ shift_result_t shift_entity_move(shift_t *ctx, const shift_entity_t *entities,
     } else {
       shift_deferred_op_t *op =
           &ctx->deferred_queue[ctx->deferred_queue_count++];
-      op->is_create   = false;
       op->src_col_id  = m->col_id;
       op->dest_col_id = dest_col_id;
       op->count       = 1;
@@ -524,9 +533,9 @@ shift_result_t shift_entity_create(shift_t *ctx, uint32_t count,
   /* Check deferred queue capacity before mutating any state.  Peek may allow
    * extending the previous op instead of pushing a new one. */
   uint32_t null_base = (uint32_t)ctx->null_front;
-  uint32_t dest_base = (uint32_t)dest->count;
   bool     can_peek  = (ctx->deferred_queue_count > 0 &&
-                    ctx->deferred_queue[ctx->deferred_queue_count - 1].is_create &&
+                    ctx->deferred_queue[ctx->deferred_queue_count - 1].src_col_id ==
+                        shift_null_col_id &&
                     ctx->deferred_queue[ctx->deferred_queue_count - 1].dest_col_id ==
                         dest_col_id &&
                     ctx->deferred_queue[ctx->deferred_queue_count - 1].src_offset +
@@ -536,56 +545,30 @@ shift_result_t shift_entity_create(shift_t *ctx, uint32_t count,
   if (!can_peek && ctx->deferred_queue_count >= ctx->deferred_queue_capacity)
     return shift_error_full;
 
-  /* Grow dest collection to hold count new entities. */
-  shift_result_t gr = col_grow(ctx, dest, dest->count + count);
-  if (gr != shift_ok)
-    return gr;
-
-  /* Zero-init new component slots (constructors called below). */
-  for (uint32_t c = 0; c < dest->component_count; c++) {
-    shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
-    memset((char *)dest->columns[c] + dest_base * ci->element_size, 0,
-           ci->element_size * count);
-  }
-
-  /* Transfer entities from null pool: place in dest, update metadata. */
+  /* Reserve entities from null pool — mark them pending so stale checks
+   * prevent access before flush. */
   for (uint32_t i = 0; i < count; i++) {
     shift_entity_t    e = null_col->entity_ids[null_base + i];
     shift_metadata_t *m = &ctx->metadata[e.index];
     assert(!m->has_pending_move);
-    dest->entity_ids[dest_base + i] = e;
-    m->col_id = dest_col_id;
-    m->offset = dest_base + i;
-    /* has_pending_move stays false — entity is live immediately. */
+    m->has_pending_move = true;
   }
 
   ctx->null_front += count;
-  dest->count     += count;
 
-  /* Call constructors eagerly (batched over this create call). */
-  for (uint32_t c = 0; c < dest->component_count; c++) {
-    shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
-    if (ci->constructor)
-      ci->constructor((char *)dest->columns[c] + dest_base * ci->element_size,
-                      count);
-  }
-
-  /* Enqueue (or extend) a create op — only on_enter and null-pool cleanup are
-   * deferred to flush. src_offset holds the null-pool base for col_remove_run. */
+  /* Enqueue (or extend) — create is just a move from null to dest. */
   if (can_peek) {
     ctx->deferred_queue[ctx->deferred_queue_count - 1].count += count;
   } else {
     shift_deferred_op_t *op = &ctx->deferred_queue[ctx->deferred_queue_count++];
-    op->is_create   = true;
     op->src_col_id  = shift_null_col_id;
     op->dest_col_id = dest_col_id;
     op->src_offset  = null_base;
     op->count       = count;
   }
 
-  /* Return pointer into dest's entity_ids — valid until the next col_grow on
-   * this collection (i.e. until the next create or flush that grows dest). */
-  *out_entities = &dest->entity_ids[dest_base];
+  /* Return pointer into null pool's entity_ids — valid until next flush. */
+  *out_entities = &null_col->entity_ids[null_base];
   return shift_ok;
 }
 
@@ -633,6 +616,232 @@ shift_result_t shift_entity_destroy(shift_t              *ctx,
 
 shift_result_t shift_entity_destroy_one(shift_t *ctx, shift_entity_t entity) {
   return shift_entity_destroy(ctx, &entity, 1);
+}
+
+/* --------------------------------------------------------------------------
+ * Immediate operations
+ * -------------------------------------------------------------------------- */
+
+shift_result_t shift_entity_create_immediate(shift_t              *ctx,
+                                              uint32_t              count,
+                                              shift_collection_id_t dest_col_id,
+                                              shift_entity_t      **out_entities) {
+  if (!ctx || !out_entities)
+    return shift_error_null;
+  if (count == 0)
+    return shift_error_invalid;
+
+  shift_collection_entry_t *null_col = &ctx->collections[shift_null_col_id];
+  if (null_col->count - ctx->null_front < (size_t)count)
+    return shift_error_full;
+
+  shift_collection_entry_t *dest = find_collection(ctx, dest_col_id);
+  if (!dest)
+    return shift_error_not_found;
+
+  uint32_t null_base = (uint32_t)ctx->null_front;
+  uint32_t dest_base = (uint32_t)dest->count;
+
+  /* Grow dest collection to hold count new entities. */
+  shift_result_t gr = col_grow(ctx, dest, dest->count + count);
+  if (gr != shift_ok)
+    return gr;
+
+  /* Zero-init new component slots. */
+  for (uint32_t c = 0; c < dest->component_count; c++) {
+    shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
+    memset((char *)dest->columns[c] + dest_base * ci->element_size, 0,
+           ci->element_size * count);
+  }
+
+  /* Transfer entities from null pool: place in dest, update metadata. */
+  for (uint32_t i = 0; i < count; i++) {
+    shift_entity_t    e = null_col->entity_ids[null_base + i];
+    shift_metadata_t *m = &ctx->metadata[e.index];
+    dest->entity_ids[dest_base + i] = e;
+    m->col_id = dest_col_id;
+    m->offset = dest_base + i;
+  }
+
+  ctx->null_front += count;
+  dest->count     += count;
+
+  /* Call constructors eagerly. */
+  for (uint32_t c = 0; c < dest->component_count; c++) {
+    shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
+    if (ci->constructor)
+      ci->constructor((char *)dest->columns[c] + dest_base * ci->element_size,
+                      count);
+  }
+
+  /* Fire on_enter immediately. */
+  if (dest->on_enter)
+    dest->on_enter(ctx, &dest->entity_ids[dest_base], count);
+
+  /* Remove from null pool immediately. */
+  col_remove_run(ctx, null_col, null_base, count);
+  /* Reset null_front since we already cleaned up. Deferred creates that
+   * preceded this call may have advanced null_front, so only subtract what
+   * we consumed. */
+  ctx->null_front -= count;
+
+  *out_entities = &dest->entity_ids[dest_base];
+  return shift_ok;
+}
+
+shift_result_t shift_entity_create_one_immediate(shift_t              *ctx,
+                                                  shift_collection_id_t dest_col_id,
+                                                  shift_entity_t       *out_entity) {
+  shift_entity_t *ep;
+  shift_result_t  r = shift_entity_create_immediate(ctx, 1, dest_col_id, &ep);
+  if (r != shift_ok)
+    return r;
+  *out_entity = ep[0];
+  return shift_ok;
+}
+
+shift_result_t shift_entity_move_immediate(shift_t              *ctx,
+                                            const shift_entity_t *entities,
+                                            uint32_t              count,
+                                            shift_collection_id_t dest_col_id) {
+  if (!ctx || !entities)
+    return shift_error_null;
+  if (count == 0)
+    return shift_error_invalid;
+
+  shift_collection_entry_t *dest = find_collection(ctx, dest_col_id);
+  if (!dest)
+    return shift_error_not_found;
+
+  /* Validate all entities. */
+  for (uint32_t i = 0; i < count; i++) {
+    if (shift_entity_is_stale(ctx, entities[i]))
+      return shift_error_stale;
+    if (ctx->metadata[entities[i].index].has_pending_move)
+      return shift_error_stale;
+  }
+
+  /* Process one entity at a time (each may come from a different source). */
+  for (uint32_t i = 0; i < count; i++) {
+    shift_metadata_t *m = &ctx->metadata[entities[i].index];
+    shift_collection_entry_t *src = find_collection(ctx, m->col_id);
+
+    shift_migration_recipe_t *recipe =
+        find_or_create_recipe(ctx, m->col_id, dest_col_id);
+    if (!recipe)
+      return shift_error_oom;
+
+    /* Grow dst. */
+    if (dest->component_count > 0) {
+      shift_result_t gr = col_grow(ctx, dest, dest->count + 1);
+      if (gr != shift_ok)
+        return gr;
+    }
+
+    uint32_t dest_base = (uint32_t)dest->count;
+    uint32_t src_offset = m->offset;
+
+    /* Copy shared components. */
+    for (uint32_t c = 0; c < recipe->copy_count; c++) {
+      shift_recipe_copy_t    *e  = &recipe->copy[c];
+      shift_component_info_t *ce = &ctx->components[e->comp_id];
+      memcpy((char *)dest->columns[e->dst_col_idx] +
+                 dest_base * ce->element_size,
+             (char *)src->columns[e->src_col_idx] +
+                 src_offset * ce->element_size,
+             ce->element_size);
+    }
+
+    /* Zero-init + construct new components. */
+    for (uint32_t c = 0; c < recipe->construct_count; c++) {
+      shift_recipe_xtor_t    *e  = &recipe->construct[c];
+      shift_component_info_t *ce = &ctx->components[e->comp_id];
+      memset((char *)dest->columns[e->col_idx] + dest_base * ce->element_size,
+             0, ce->element_size);
+    }
+
+    /* Destruct dropped components. */
+    for (uint32_t c = 0; c < recipe->destruct_count; c++) {
+      shift_recipe_xtor_t    *e  = &recipe->destruct[c];
+      shift_component_info_t *ce = &ctx->components[e->comp_id];
+      if (ce->destructor)
+        ce->destructor((char *)src->columns[e->col_idx] +
+                           src_offset * ce->element_size,
+                       1);
+    }
+
+    /* Fire on_leave (entity still addressable in src). */
+    if (src->on_leave)
+      src->on_leave(ctx, &src->entity_ids[src_offset], 1);
+
+    /* Place entity in dest + update metadata. */
+    dest->entity_ids[dest_base] = src->entity_ids[src_offset];
+    m->col_id = dest_col_id;
+    m->offset = dest_base;
+    dest->count++;
+
+    /* Call constructors for new components. */
+    for (uint32_t c = 0; c < recipe->construct_count; c++) {
+      shift_recipe_xtor_t    *e  = &recipe->construct[c];
+      shift_component_info_t *ce = &ctx->components[e->comp_id];
+      if (ce->constructor)
+        ce->constructor((char *)dest->columns[e->col_idx] +
+                            dest_base * ce->element_size,
+                        1);
+    }
+
+    /* Fire on_enter. */
+    if (dest->on_enter)
+      dest->on_enter(ctx, &dest->entity_ids[dest_base], 1);
+
+    /* Remove from src (swap-remove). */
+    col_remove_run(ctx, src, src_offset, 1);
+  }
+
+  return shift_ok;
+}
+
+shift_result_t shift_entity_move_one_immediate(shift_t              *ctx,
+                                                shift_entity_t        entity,
+                                                shift_collection_id_t dest_col_id) {
+  return shift_entity_move_immediate(ctx, &entity, 1, dest_col_id);
+}
+
+shift_result_t shift_entity_destroy_immediate(shift_t              *ctx,
+                                               const shift_entity_t *entities,
+                                               uint32_t              count) {
+  return shift_entity_move_immediate(ctx, entities, count, shift_null_col_id);
+}
+
+shift_result_t shift_entity_destroy_one_immediate(shift_t        *ctx,
+                                                   shift_entity_t  entity) {
+  return shift_entity_destroy_immediate(ctx, &entity, 1);
+}
+
+/* --------------------------------------------------------------------------
+ * Generation revocation
+ * -------------------------------------------------------------------------- */
+
+shift_result_t shift_entity_revoke(shift_t        *ctx,
+                                    shift_entity_t  entity,
+                                    shift_entity_t *out_new) {
+  if (!ctx || !out_new)
+    return shift_error_null;
+  if (shift_entity_is_stale(ctx, entity))
+    return shift_error_stale;
+  if (ctx->metadata[entity.index].has_pending_move)
+    return shift_error_stale;
+
+  shift_metadata_t *m = &ctx->metadata[entity.index];
+  m->generation++;
+
+  /* Update entity_ids in the entity's current collection. */
+  shift_collection_entry_t *col = find_collection(ctx, m->col_id);
+  col->entity_ids[m->offset] =
+      (shift_entity_t){entity.index, m->generation};
+
+  *out_new = (shift_entity_t){entity.index, m->generation};
+  return shift_ok;
 }
 
 /* --------------------------------------------------------------------------
@@ -688,11 +897,7 @@ static inline void flush_batch(shift_t *ctx, shift_batch_t *b) {
  */
 static void flush_cleanup(shift_t *ctx, size_t unprocessed_count) {
   for (size_t j = 0; j < unprocessed_count; j++) {
-    shift_deferred_op_t *op = &ctx->deferred_queue[j];
-    /* Create ops place entities eagerly — nothing to undo, no has_pending_move
-     * was set. */
-    if (op->is_create)
-      continue;
+    shift_deferred_op_t      *op  = &ctx->deferred_queue[j];
     shift_collection_entry_t *src = find_collection(ctx, op->src_col_id);
     if (!src)
       continue;
@@ -839,18 +1044,6 @@ shift_result_t shift_flush(shift_t *ctx) {
   for (size_t i = ctx->deferred_queue_count; i-- > 0;) {
     shift_deferred_op_t *op = &ctx->deferred_queue[i];
 
-    /* Create ops: entities are already placed in dest — just fire on_enter and
-     * compact the null pool. Constructors were called eagerly at create time. */
-    if (op->is_create) {
-      flush_batch(ctx, &batch);
-      shift_collection_entry_t *null_col = &ctx->collections[shift_null_col_id];
-      shift_collection_entry_t *dst      = find_collection(ctx, op->dest_col_id);
-      if (dst && dst->on_enter)
-        dst->on_enter(ctx, &null_col->entity_ids[op->src_offset], op->count);
-      col_remove_run(ctx, null_col, op->src_offset, op->count);
-      continue;
-    }
-
     shift_collection_entry_t *src = find_collection(ctx, op->src_col_id);
     shift_collection_entry_t *dst = find_collection(ctx, op->dest_col_id);
     if (!src || !dst)
@@ -878,8 +1071,8 @@ shift_result_t shift_flush(shift_t *ctx) {
       batch.base       = (uint32_t)dst->count;
     }
 
-    /* Grow dst storage (no-op for null dst: 0 components). */
-    if (dst->component_count > 0) {
+    /* Grow dst storage (entity_ids + component columns). */
+    {
       shift_result_t gr = col_grow(ctx, dst, dst->count + op->count);
       if (gr != shift_ok) {
         flush_cleanup(ctx, i + 1);

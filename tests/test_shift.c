@@ -209,8 +209,9 @@ void test_create_flush_get_component(void) {
 }
 
 void test_get_component_before_flush(void) {
-  /* Entities are live immediately after shift_entity_create — component data
-   * must be accessible and writable before shift_flush is called. */
+  /* Deferred create: entities are NOT accessible before flush.
+   * shift_entity_get_component returns shift_error_stale for pending entities.
+   * After flush, components are accessible. */
   shift_t *ctx = make_ctx();
 
   shift_component_info_t info = {.element_size = sizeof(uint32_t)};
@@ -228,20 +229,18 @@ void test_get_component_before_flush(void) {
   shift_entity_t e;
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_id, &e));
 
-  /* Component is accessible before flush. */
+  /* Component is NOT accessible before flush (entity is pending). */
   void *ptr = NULL;
-  TEST_ASSERT_EQUAL_INT(shift_ok,
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
                         shift_entity_get_component(ctx, e, comp_id, &ptr));
-  TEST_ASSERT_NOT_NULL(ptr);
 
-  /* Writing before flush is reflected after flush. */
-  *(uint32_t *)ptr = 0xCAFE;
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
 
+  /* After flush, component is accessible. */
   void *ptr2 = NULL;
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_entity_get_component(ctx, e, comp_id, &ptr2));
-  TEST_ASSERT_EQUAL_UINT32(0xCAFE, *(uint32_t *)ptr2);
+  TEST_ASSERT_NOT_NULL(ptr2);
 
   shift_context_destroy(ctx);
 }
@@ -1215,9 +1214,9 @@ void test_fixed_capacity_eager_alloc(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create(ctx, 4, col_id, &ep));
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
 
-  /* Eager create: col_grow is a no-op (capacity already sufficient) and create
-   * ops skip recipe lookup at flush — zero reallocs expected. */
-  TEST_ASSERT_EQUAL_INT(after_register + 0, g_realloc_count);
+  /* col_grow is a no-op (capacity already sufficient). Create ops go through
+   * the recipe system which reallocs the migration_recipes array once. */
+  TEST_ASSERT_EQUAL_INT(after_register + 1, g_realloc_count);
 
   shift_context_destroy(ctx);
 }
@@ -1498,6 +1497,484 @@ void test_collection_register_duplicate_component(void) {
 }
 
 /* --------------------------------------------------------------------------
+ * Zero-component (empty) collection tests
+ * -------------------------------------------------------------------------- */
+
+void test_empty_collection_register(void) {
+  shift_t *ctx = make_ctx();
+
+  /* comp_count=0, comp_ids=NULL is now valid. */
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(ctx, &(shift_collection_info_t){0}, &col_id));
+
+  /* Collection exists and starts empty. */
+  shift_entity_t *ents  = NULL;
+  size_t          count = 99;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, col_id, &ents, &count));
+  TEST_ASSERT_EQUAL_size_t(0, count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_empty_collection_create_move_destroy(void) {
+  /* Create entities into an empty collection, move between empty collections,
+   * and destroy from one. */
+  shift_t *ctx = make_ctx();
+
+  shift_collection_id_t col_a, col_b;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(ctx, &(shift_collection_info_t){0}, &col_a));
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(ctx, &(shift_collection_info_t){0}, &col_b));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_a, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Entity is in col_a. */
+  shift_entity_t *ents  = NULL;
+  size_t          count = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, col_a, &ents, &count));
+  TEST_ASSERT_EQUAL_size_t(1, count);
+
+  /* Move to col_b. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_move_one(ctx, e, col_b));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, col_a, &ents, &count));
+  TEST_ASSERT_EQUAL_size_t(0, count);
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, col_b, &ents, &count));
+  TEST_ASSERT_EQUAL_size_t(1, count);
+
+  /* Destroy from col_b. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_destroy_one(ctx, e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, col_b, &ents, &count));
+  TEST_ASSERT_EQUAL_size_t(0, count);
+  TEST_ASSERT_TRUE(shift_entity_is_stale(ctx, e));
+
+  shift_context_destroy(ctx);
+}
+
+void test_empty_collection_macro(void) {
+  shift_t *ctx = make_ctx();
+
+  SHIFT_COLLECTION_EMPTY(ctx, marker_id);
+  TEST_ASSERT_TRUE(marker_id >= 1);
+
+  shift_entity_t *ents  = NULL;
+  size_t          count = 99;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, marker_id, &ents, &count));
+  TEST_ASSERT_EQUAL_size_t(0, count);
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * Convenience macro tests
+ * -------------------------------------------------------------------------- */
+
+void test_convenience_macros(void) {
+  shift_t *ctx = make_ctx();
+
+  SHIFT_COMPONENT(ctx, pos_id, float[3]);
+  SHIFT_COMPONENT(ctx, vel_id, float[3]);
+  SHIFT_COLLECTION(ctx, moving_id, pos_id, vel_id);
+
+  /* Verify the collection works. */
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, moving_id, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  void *pos_data = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, pos_id, &pos_data));
+  TEST_ASSERT_NOT_NULL(pos_data);
+
+  shift_context_destroy(ctx);
+}
+
+void test_convenience_macros_ex(void) {
+  shift_t *ctx      = make_ctx();
+  g_ctor_count      = 0;
+  g_ctor_call_count = 0;
+  g_dtor_count      = 0;
+  g_dtor_call_count = 0;
+
+  SHIFT_COMPONENT_EX(ctx, comp_id, uint32_t, counting_ctor, counting_dtor);
+  SHIFT_COLLECTION(ctx, col_id, comp_id);
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_id, &e));
+  TEST_ASSERT_EQUAL_INT(0, g_ctor_count); /* deferred — not called yet */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+  TEST_ASSERT_EQUAL_INT(1, g_ctor_count); /* called at flush */
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_destroy_one(ctx, e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+  TEST_ASSERT_EQUAL_INT(1, g_dtor_count);
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * Immediate operation tests
+ * -------------------------------------------------------------------------- */
+
+void test_immediate_create(void) {
+  shift_t *ctx  = make_ctx();
+  g_enter_count = 0;
+
+  shift_component_info_t info = {.element_size = sizeof(uint32_t)};
+  shift_component_id_t   comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+
+  shift_collection_info_t col_info = {
+      .comp_ids   = &comp_id,
+      .comp_count = 1,
+      .on_enter   = test_on_enter_cb,
+  };
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_register(ctx, &col_info, &col_id));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_one_immediate(ctx, col_id, &e));
+
+  /* on_enter fired immediately. */
+  TEST_ASSERT_EQUAL_INT(1, g_enter_count);
+
+  /* Entity is live — can get component without flush. */
+  void *ptr = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_id, &ptr));
+  TEST_ASSERT_NOT_NULL(ptr);
+
+  /* No deferred ops — flush is a no-op. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Entity still accessible after flush. */
+  void *ptr2 = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_id, &ptr2));
+  TEST_ASSERT_NOT_NULL(ptr2);
+
+  shift_context_destroy(ctx);
+}
+
+void test_immediate_create_batch(void) {
+  shift_t *ctx      = make_ctx();
+  g_ctor_count      = 0;
+  g_ctor_call_count = 0;
+  g_enter_count     = 0;
+
+  shift_component_info_t info = {
+      .element_size = sizeof(uint32_t),
+      .constructor  = counting_ctor,
+  };
+  shift_component_id_t comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+
+  shift_collection_info_t col_info = {
+      .comp_ids   = &comp_id,
+      .comp_count = 1,
+      .on_enter   = test_on_enter_cb,
+  };
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_register(ctx, &col_info, &col_id));
+
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_immediate(ctx, 3, col_id, &ep));
+
+  TEST_ASSERT_EQUAL_INT(3, g_ctor_count);
+  TEST_ASSERT_EQUAL_INT(1, g_ctor_call_count); /* batched */
+  TEST_ASSERT_EQUAL_INT(3, g_enter_count);
+
+  /* All 3 entities accessible. */
+  void  *arr   = NULL;
+  size_t count = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_get_component_array(
+                                      ctx, col_id, comp_id, &arr, &count));
+  TEST_ASSERT_EQUAL_size_t(3, count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_immediate_move(void) {
+  shift_t *ctx  = make_ctx();
+  g_enter_count = 0;
+  g_leave_count = 0;
+
+  shift_component_id_t   comp_a, comp_b;
+  shift_component_info_t ia = {.element_size = sizeof(uint32_t)};
+  shift_component_info_t ib = {.element_size = sizeof(float)};
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(ctx, &ia, &comp_a));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(ctx, &ib, &comp_b));
+
+  shift_collection_id_t col_src, col_dst;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids  = &comp_a,
+                                     .comp_count = 1,
+                                     .on_leave   = test_on_leave_cb},
+          &col_src));
+  shift_component_id_t dst_comps[] = {comp_a, comp_b};
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids  = dst_comps,
+                                     .comp_count = 2,
+                                     .on_enter   = test_on_enter_cb},
+          &col_dst));
+
+  /* Create entity in src (using deferred create + flush). */
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_src, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Write a value into comp_a. */
+  void *pa = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_a, &pa));
+  *(uint32_t *)pa = 77;
+
+  /* Immediate move. */
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_move_one_immediate(ctx, e, col_dst));
+
+  TEST_ASSERT_EQUAL_INT(1, g_leave_count);
+  TEST_ASSERT_EQUAL_INT(1, g_enter_count);
+
+  /* comp_a preserved, comp_b zero-init. */
+  void *pa2 = NULL, *pb2 = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_a, &pa2));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_b, &pb2));
+  TEST_ASSERT_EQUAL_UINT32(77, *(uint32_t *)pa2);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, *(float *)pb2);
+
+  /* src is empty, dst has 1. */
+  void  *arr;
+  size_t cnt;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_get_component_array(
+                                      ctx, col_src, comp_a, &arr, &cnt));
+  TEST_ASSERT_EQUAL_size_t(0, cnt);
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_get_component_array(
+                                      ctx, col_dst, comp_a, &arr, &cnt));
+  TEST_ASSERT_EQUAL_size_t(1, cnt);
+
+  shift_context_destroy(ctx);
+}
+
+void test_immediate_destroy(void) {
+  shift_t *ctx      = make_ctx();
+  g_dtor_count      = 0;
+  g_dtor_call_count = 0;
+  g_leave_count     = 0;
+
+  shift_component_info_t info = {
+      .element_size = sizeof(uint32_t),
+      .destructor   = counting_dtor,
+  };
+  shift_component_id_t comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+
+  shift_collection_info_t col_info = {
+      .comp_ids   = &comp_id,
+      .comp_count = 1,
+      .on_leave   = test_on_leave_cb,
+  };
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_register(ctx, &col_info, &col_id));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_id, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_destroy_one_immediate(ctx, e));
+
+  /* Destructor + on_leave fired immediately. */
+  TEST_ASSERT_EQUAL_INT(1, g_dtor_count);
+  TEST_ASSERT_EQUAL_INT(1, g_leave_count);
+
+  /* Entity is now stale (generation bumped by null_collection_on_enter). */
+  TEST_ASSERT_TRUE(shift_entity_is_stale(ctx, e));
+
+  /* Collection is empty. */
+  void  *arr   = NULL;
+  size_t count = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_get_component_array(
+                                      ctx, col_id, comp_id, &arr, &count));
+  TEST_ASSERT_EQUAL_size_t(0, count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_immediate_op_with_pending_deferred_returns_error(void) {
+  /* An entity with has_pending_move=true must be rejected by immediate ops. */
+  shift_t *ctx = make_ctx();
+
+  shift_component_info_t info = {.element_size = sizeof(uint32_t)};
+  shift_component_id_t   comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+
+  shift_collection_id_t col_a, col_b;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_a));
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_b));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_a, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Queue a deferred move. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_move_one(ctx, e, col_b));
+  TEST_ASSERT_TRUE(shift_entity_is_moving(ctx, e));
+
+  /* Immediate ops must fail. */
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_move_one_immediate(ctx, e, col_a));
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_destroy_one_immediate(ctx, e));
+
+  /* Flush succeeds normally. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * shift_entity_revoke tests
+ * -------------------------------------------------------------------------- */
+
+void test_revoke_basic(void) {
+  shift_t *ctx = make_ctx();
+
+  shift_component_info_t info = {.element_size = sizeof(uint32_t)};
+  shift_component_id_t   comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+  shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_id));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_id, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* Write data. */
+  void *ptr = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, comp_id, &ptr));
+  *(uint32_t *)ptr = 42;
+
+  /* Revoke. */
+  shift_entity_t new_handle;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_revoke(ctx, e, &new_handle));
+
+  /* Old handle is stale. */
+  TEST_ASSERT_TRUE(shift_entity_is_stale(ctx, e));
+
+  /* New handle works. */
+  TEST_ASSERT_FALSE(shift_entity_is_stale(ctx, new_handle));
+  void *ptr2 = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, new_handle, comp_id, &ptr2));
+  TEST_ASSERT_EQUAL_UINT32(42, *(uint32_t *)ptr2);
+
+  /* Same index, bumped generation. */
+  TEST_ASSERT_EQUAL_UINT32(e.index, new_handle.index);
+  TEST_ASSERT_EQUAL_UINT32(e.generation + 1, new_handle.generation);
+
+  shift_context_destroy(ctx);
+}
+
+void test_revoke_stale_entity(void) {
+  shift_t *ctx = make_ctx();
+
+  shift_entity_t stale = {.index = 0, .generation = 99};
+  shift_entity_t out;
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_revoke(ctx, stale, &out));
+
+  shift_context_destroy(ctx);
+}
+
+void test_revoke_pending_move_entity(void) {
+  shift_t *ctx = make_ctx();
+
+  shift_component_info_t info = {.element_size = sizeof(uint32_t)};
+  shift_component_id_t   comp_id;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_register(ctx, &info, &comp_id));
+
+  shift_collection_id_t col_a, col_b;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_a));
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_b));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_a, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_move_one(ctx, e, col_b));
+
+  /* Revoke should fail while move is pending. */
+  shift_entity_t out;
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_revoke(ctx, e, &out));
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
  * Runner
  * -------------------------------------------------------------------------- */
 
@@ -1540,5 +2017,18 @@ int main(void) {
   RUN_TEST(test_entity_move_batch_partial_stale_no_side_effects);
   RUN_TEST(test_on_leave_can_access_source_component);
   RUN_TEST(test_collection_register_duplicate_component);
+  RUN_TEST(test_empty_collection_register);
+  RUN_TEST(test_empty_collection_create_move_destroy);
+  RUN_TEST(test_empty_collection_macro);
+  RUN_TEST(test_convenience_macros);
+  RUN_TEST(test_convenience_macros_ex);
+  RUN_TEST(test_immediate_create);
+  RUN_TEST(test_immediate_create_batch);
+  RUN_TEST(test_immediate_move);
+  RUN_TEST(test_immediate_destroy);
+  RUN_TEST(test_immediate_op_with_pending_deferred_returns_error);
+  RUN_TEST(test_revoke_basic);
+  RUN_TEST(test_revoke_stale_entity);
+  RUN_TEST(test_revoke_pending_move_entity);
   return UNITY_END();
 }

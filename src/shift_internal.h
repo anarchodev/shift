@@ -41,10 +41,7 @@ typedef struct shift_deferred_op_s {
   shift_collection_id_t src_col_id;
   shift_collection_id_t dest_col_id;
   uint32_t              count;      /* run length (>= 1) */
-  uint32_t              src_offset; /* for moves: offset in src; for creates:
-                                       offset in null pool (for col_remove_run) */
-  bool                  is_create;  /* true → eager create; only on_enter + null
-                                       pool cleanup deferred to flush */
+  uint32_t              src_offset; /* offset in source collection */
 } shift_deferred_op_t;
 
 /* --------------------------------------------------------------------------

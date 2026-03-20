@@ -155,7 +155,9 @@ shift_result_t shift_collection_get_entities(shift_t              *ctx,
  * Entity operations
  * -------------------------------------------------------------------------- */
 
-/* out_entities points into internal storage; valid only until next
+/* Deferred create — reserves entity handles but does not place them until
+ * shift_flush(). Components are not accessible until after flush.
+ * out_entities points into internal storage; valid only until next
  * shift_flush(). */
 shift_result_t shift_entity_create(shift_t *ctx, uint32_t count,
                                    shift_collection_id_t dest_col_id,
@@ -180,6 +182,43 @@ shift_result_t shift_entity_destroy(shift_t              *ctx,
                                     const shift_entity_t *entities,
                                     uint32_t              count);
 shift_result_t shift_entity_destroy_one(shift_t *ctx, shift_entity_t entity);
+
+/* --------------------------------------------------------------------------
+ * Immediate operations — bypass the deferred queue entirely.
+ * Constructors, destructors, on_enter, on_leave all fire inline.
+ * Returns shift_error_stale if entity has a pending deferred move.
+ * -------------------------------------------------------------------------- */
+
+shift_result_t shift_entity_create_immediate(shift_t              *ctx,
+                                              uint32_t              count,
+                                              shift_collection_id_t dest_col_id,
+                                              shift_entity_t      **out_entities);
+shift_result_t shift_entity_create_one_immediate(shift_t              *ctx,
+                                                  shift_collection_id_t dest_col_id,
+                                                  shift_entity_t       *out_entity);
+
+shift_result_t shift_entity_move_immediate(shift_t              *ctx,
+                                            const shift_entity_t *entities,
+                                            uint32_t              count,
+                                            shift_collection_id_t dest_col_id);
+shift_result_t shift_entity_move_one_immediate(shift_t              *ctx,
+                                                shift_entity_t        entity,
+                                                shift_collection_id_t dest_col_id);
+
+shift_result_t shift_entity_destroy_immediate(shift_t              *ctx,
+                                               const shift_entity_t *entities,
+                                               uint32_t              count);
+shift_result_t shift_entity_destroy_one_immediate(shift_t        *ctx,
+                                                   shift_entity_t  entity);
+
+/* --------------------------------------------------------------------------
+ * Generation revocation — invalidates all existing handles without destroying
+ * the entity. Returns the new valid handle via out_new.
+ * -------------------------------------------------------------------------- */
+
+shift_result_t shift_entity_revoke(shift_t        *ctx,
+                                    shift_entity_t  entity,
+                                    shift_entity_t *out_new);
 
 /* --------------------------------------------------------------------------
  * Flush
@@ -218,3 +257,57 @@ shift_entity_get_collection(const shift_t *ctx, shift_entity_t entity,
 
   return shift_ok;
 }
+
+/* --------------------------------------------------------------------------
+ * Convenience macros for component/collection registration
+ * -------------------------------------------------------------------------- */
+
+/* Declares shift_component_id_t NAME and registers it. */
+#define SHIFT_COMPONENT(ctx, name, type)                                      \
+  shift_component_id_t name;                                                  \
+  shift_component_register(                                                   \
+      (ctx), &(shift_component_info_t){.element_size = sizeof(type)}, &(name))
+
+/* Like SHIFT_COMPONENT but with constructor/destructor. */
+#define SHIFT_COMPONENT_EX(ctx, name, type, ctor, dtor)                       \
+  shift_component_id_t name;                                                  \
+  shift_component_register(                                                   \
+      (ctx),                                                                  \
+      &(shift_component_info_t){.element_size = sizeof(type),                 \
+                                .constructor  = (ctor),                       \
+                                .destructor   = (dtor)},                      \
+      &(name))
+
+/* Declares shift_collection_id_t NAME and registers with listed components. */
+#define SHIFT_COLLECTION(ctx, name, ...)                                      \
+  shift_collection_id_t name;                                                 \
+  do {                                                                        \
+    shift_component_id_t _comps[] = {__VA_ARGS__};                            \
+    shift_collection_register(                                                \
+        (ctx),                                                                \
+        &(shift_collection_info_t){                                           \
+            .comp_ids   = _comps,                                             \
+            .comp_count = sizeof(_comps) / sizeof(_comps[0])},                \
+        &(name));                                                             \
+  } while (0)
+
+/* Like SHIFT_COLLECTION but with max_capacity, on_enter, on_leave. */
+#define SHIFT_COLLECTION_EX(ctx, name, cap, enter, leave, ...)                \
+  shift_collection_id_t name;                                                 \
+  do {                                                                        \
+    shift_component_id_t _comps[] = {__VA_ARGS__};                            \
+    shift_collection_register(                                                \
+        (ctx),                                                                \
+        &(shift_collection_info_t){                                           \
+            .comp_ids      = _comps,                                          \
+            .comp_count    = sizeof(_comps) / sizeof(_comps[0]),              \
+            .max_capacity  = (cap),                                           \
+            .on_enter      = (enter),                                         \
+            .on_leave      = (leave)},                                        \
+        &(name));                                                             \
+  } while (0)
+
+/* Zero-component collection (state marker / staging area). */
+#define SHIFT_COLLECTION_EMPTY(ctx, name)                                     \
+  shift_collection_id_t name;                                                 \
+  shift_collection_register((ctx), &(shift_collection_info_t){0}, &(name))
