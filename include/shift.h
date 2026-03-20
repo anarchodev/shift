@@ -259,6 +259,70 @@ shift_entity_get_collection(const shift_t *ctx, shift_entity_t entity,
 }
 
 /* --------------------------------------------------------------------------
+ * Convenience registration functions
+ * -------------------------------------------------------------------------- */
+
+/* Register a component, returning its ID. Stores error in *err (may be NULL). */
+static inline shift_component_id_t
+shift_component_add(shift_t *ctx, size_t element_size, shift_result_t *err) {
+  shift_component_id_t   id = 0;
+  shift_component_info_t info = {.element_size = element_size};
+  shift_result_t         r = shift_component_register(ctx, &info, &id);
+  if (err)
+    *err = r;
+  return id;
+}
+
+/* Register a component with constructor/destructor. */
+static inline shift_component_id_t
+shift_component_add_ex(shift_t *ctx, size_t element_size,
+                       void (*constructor)(void *, uint32_t),
+                       void (*destructor)(void *, uint32_t),
+                       shift_result_t *err) {
+  shift_component_id_t   id = 0;
+  shift_component_info_t info = {.element_size = element_size,
+                                 .constructor  = constructor,
+                                 .destructor   = destructor};
+  shift_result_t         r = shift_component_register(ctx, &info, &id);
+  if (err)
+    *err = r;
+  return id;
+}
+
+/* Register a collection from an explicit array of component IDs. */
+static inline shift_collection_id_t
+shift_collection_add(shift_t *ctx, size_t comp_count,
+                     const shift_component_id_t *comp_ids,
+                     shift_result_t *err) {
+  shift_collection_id_t   id = 0;
+  shift_collection_info_t info = {.comp_ids   = comp_ids,
+                                  .comp_count = comp_count};
+  shift_result_t          r = shift_collection_register(ctx, &info, &id);
+  if (err)
+    *err = r;
+  return id;
+}
+
+/* Register an empty (zero-component) collection. */
+static inline shift_collection_id_t
+shift_collection_add_empty(shift_t *ctx, shift_result_t *err) {
+  shift_collection_id_t   id = 0;
+  shift_collection_info_t info = {0};
+  shift_result_t          r = shift_collection_register(ctx, &info, &id);
+  if (err)
+    *err = r;
+  return id;
+}
+
+/* Register a collection with inline varargs component IDs. */
+#define shift_collection_add_of(ctx, err, ...)                                 \
+  shift_collection_add(                                                        \
+      (ctx),                                                                   \
+      sizeof((shift_component_id_t[]){__VA_ARGS__}) /                          \
+          sizeof(shift_component_id_t),                                        \
+      (shift_component_id_t[]){__VA_ARGS__}, (err))
+
+/* --------------------------------------------------------------------------
  * Convenience macros for component/collection registration
  * -------------------------------------------------------------------------- */
 
