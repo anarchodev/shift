@@ -1974,6 +1974,57 @@ void test_revoke_pending_move_entity(void) {
   shift_context_destroy(ctx);
 }
 
+void test_convenience_add_functions(void) {
+  shift_t *ctx = make_ctx();
+  shift_result_t err = shift_ok;
+
+  /* shift_component_add — first ID is 0 */
+  shift_component_id_t pos = shift_component_add(ctx, sizeof(float) * 2, &err);
+  TEST_ASSERT_EQUAL_INT(shift_ok, err);
+
+  /* shift_component_add_ex (NULL ctor/dtor is fine) */
+  shift_component_id_t vel =
+      shift_component_add_ex(ctx, sizeof(float) * 2, NULL, NULL, &err);
+  TEST_ASSERT_EQUAL_INT(shift_ok, err);
+  TEST_ASSERT_NOT_EQUAL_UINT32(pos, vel);
+
+  /* NULL err pointer should not crash */
+  shift_component_id_t hp = shift_component_add(ctx, sizeof(int), NULL);
+
+  /* shift_collection_add_of — collection 0 is the null pool, so first
+   * user-registered collection is 1. */
+  shift_collection_id_t col =
+      shift_collection_add_of(ctx, &err, pos, vel);
+  TEST_ASSERT_EQUAL_INT(shift_ok, err);
+  TEST_ASSERT_NOT_EQUAL(0, col);
+
+  /* shift_collection_add_empty */
+  shift_collection_id_t empty = shift_collection_add_empty(ctx, &err);
+  TEST_ASSERT_EQUAL_INT(shift_ok, err);
+  TEST_ASSERT_NOT_EQUAL(0, empty);
+
+  /* shift_collection_add with explicit array */
+  shift_component_id_t arr[] = {pos, hp};
+  shift_collection_id_t col2 =
+      shift_collection_add(ctx, 2, arr, &err);
+  TEST_ASSERT_EQUAL_INT(shift_ok, err);
+  TEST_ASSERT_NOT_EQUAL(0, col2);
+
+  /* Smoke: create an entity, flush, read component */
+  shift_entity_t *ents = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create(ctx, 1, col, &ents));
+  shift_entity_t e = ents[0]; /* copy before flush invalidates pointer */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  void *data = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, pos, &data));
+  TEST_ASSERT_NOT_NULL(data);
+
+  shift_context_destroy(ctx);
+}
+
 /* --------------------------------------------------------------------------
  * Runner
  * -------------------------------------------------------------------------- */
@@ -2030,5 +2081,6 @@ int main(void) {
   RUN_TEST(test_revoke_basic);
   RUN_TEST(test_revoke_stale_entity);
   RUN_TEST(test_revoke_pending_move_entity);
+  RUN_TEST(test_convenience_add_functions);
   return UNITY_END();
 }
