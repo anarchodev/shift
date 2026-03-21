@@ -9,7 +9,7 @@ A C23 library that provides an entity system and collections with deferred mutat
 **Core concepts:**
 
 - **Entities** — `{index, generation}` handles. The generation increments on destruction, making stale handles detectable.
-- **Components** — typed data blobs registered with `shift_component_register`. Each component has an `element_size` and optional `constructor`/`destructor` callbacks invoked in batch on flush.
+- **Components** — typed data blobs registered with `shift_component_register`. Each component has an `element_size` and optional `constructor`/`destructor` callbacks. All callbacks receive the context, collection ID, entity array, data pointer, offset, and count — so they can rip through SoA arrays with pointer arithmetic.
 - **Collections** — named groups that store a fixed set of components in Structure-of-Arrays layout. Entities live in exactly one collection at a time. Collections support `on_enter`/`on_leave` callbacks and optional fixed capacity.
 - **Deferred mutations** — `shift_entity_move`, `shift_entity_create`, and `shift_entity_destroy` enqueue operations. Nothing takes effect until `shift_flush()`. For cases where you need entities live immediately, `_immediate` variants bypass the queue entirely.
 - **Generation revocation** — `shift_entity_revoke` bumps an entity's generation, invalidating all existing handles without destroying the entity.
@@ -78,7 +78,15 @@ SHIFT_COMPONENT(ctx, vel_id, float[3]);
 SHIFT_COMPONENT_EX(ctx, hp_id, int, hp_ctor, hp_dtor);  /* with ctor/dtor */
 ```
 
-`constructor` and `destructor` are `void fn(void *data, uint32_t count)`. They are called in batch during `shift_flush()` whenever entities enter or leave a collection that owns the component.
+`constructor` and `destructor` follow the same signature pattern as all shift callbacks:
+
+```c
+void my_ctor(shift_t *ctx, shift_collection_id_t col_id,
+             const shift_entity_t *entities, void *data,
+             uint32_t offset, uint32_t count);
+```
+
+They receive the context, collection, entity array, component column base pointer, offset into the arrays, and count. This lets you cross-reference other components or entity handles during init/teardown. They are called in batch during `shift_flush()` whenever entities enter or leave a collection that owns the component.
 
 ### 3. Register collections
 
@@ -109,10 +117,21 @@ Set `max_capacity` to a non-zero value for a **fixed-capacity** collection. All 
 Zero-component collections (`comp_count = 0`) are valid and useful as state markers or staging areas. They store only entity handles with no component data.
 
 **on_enter / on_leave contract:**
-- `on_enter(ctx, entities, count)` fires after entities are fully placed — components are zero-inited, constructors have been called, and the entity handle is valid inside the callback.
-- `on_leave(ctx, entities, count)` fires before entities are removed — components are still accessible via `shift_entity_get_component` inside the callback.
+
+All collection callbacks share one signature:
+
+```c
+void my_cb(shift_t *ctx, shift_collection_id_t col_id,
+           const shift_entity_t *entities, uint32_t offset,
+           uint32_t count, void *user_ctx);
+```
+
+- `on_enter` fires after entities are fully placed — components are zero-inited, constructors have been called, and the entity handle is valid inside the callback.
+- `on_leave` fires before entities are removed — components are still accessible via `shift_entity_get_component` or directly via the offset into the SoA arrays.
 - For moves: on_leave fires on the source, then on_enter fires on the destination.
 - For creates: on_enter only. For destroys: on_leave only.
+
+The `offset` and `count` parameters let you index directly into the collection's SoA arrays — the same offset works for the entity array and every component column. See [Pattern D](#pattern-d-fast-batch-processing-in-callbacks) below.
 
 ### 4. Create entities
 
@@ -445,8 +464,11 @@ A destructor on an `fd_t` component plus a "pending_close" collection eliminates
 double-free gymnastics entirely:
 
 ```c
-static void fd_destructor(void *data, uint32_t count) {
-    int *fds = data;
+static void fd_destructor(shift_t *ctx, shift_collection_id_t col_id,
+                          const shift_entity_t *entities, void *data,
+                          uint32_t offset, uint32_t count) {
+    (void)ctx; (void)col_id; (void)entities;
+    int *fds = (int *)data + offset;
     for (uint32_t i = 0; i < count; i++)
         if (fds[i] >= 0) close(fds[i]);
 }
@@ -544,6 +566,113 @@ for (int i = 0; i < 10; i++) {
 shift_entity_create_end(ctx, ents, 10);
 /* single on_enter callback with count=10, all entities fully initialized */
 ```
+
+### Pattern D: Fast batch processing in callbacks
+
+Every callback — `on_enter`, `on_leave`, constructors, destructors — receives
+the collection's entity array, an offset, and a count. The offset is the same
+index into every SoA column in that collection. This means you never need to
+call `shift_entity_get_component` in a loop. You grab the column base pointer
+once and rip through it with pointer arithmetic.
+
+Here is a concrete example. Suppose you have a network server where each
+connection has a socket fd and a per-connection statistics struct. When
+connections enter the `established` collection you want to register them with
+epoll and zero their stats:
+
+```c
+typedef struct { uint64_t bytes_in; uint64_t bytes_out; } conn_stats_t;
+
+SHIFT_COMPONENT(ctx, sock_id, int);
+SHIFT_COMPONENT(ctx, stats_id, conn_stats_t);
+SHIFT_COLLECTION(ctx, established_id, sock_id, stats_id);
+```
+
+Without the offset-based signature you would write the on_enter callback like
+this — one `shift_entity_get_component` call per entity, per component:
+
+```c
+/* Slow: two indirect lookups per entity per iteration */
+void on_establish_slow(shift_t *ctx, shift_collection_id_t col_id,
+                       const shift_entity_t *entities, uint32_t offset,
+                       uint32_t count, void *user_ctx) {
+    int epfd = *(int *)user_ctx;
+    for (uint32_t i = 0; i < count; i++) {
+        int *fd;
+        shift_entity_get_component(ctx, entities[offset + i], sock_id,
+                                   (void **)&fd);
+        conn_stats_t *st;
+        shift_entity_get_component(ctx, entities[offset + i], stats_id,
+                                   (void **)&st);
+        struct epoll_event ev = {.events = EPOLLIN, .data.fd = *fd};
+        epoll_ctl(epfd, EPOLL_CTL_ADD, *fd, &ev);
+        *st = (conn_stats_t){0};
+    }
+}
+```
+
+With the offset you grab each column base pointer once and iterate with
+straight pointer arithmetic — no hash lookups, no handle validation, just
+sequential memory access:
+
+```c
+/* Fast: two column fetches, then a tight loop over contiguous memory */
+void on_establish(shift_t *ctx, shift_collection_id_t col_id,
+                  const shift_entity_t *entities, uint32_t offset,
+                  uint32_t count, void *user_ctx) {
+    int epfd = *(int *)user_ctx;
+
+    void *fd_base, *st_base;
+    shift_collection_get_component_array(ctx, col_id, sock_id,
+                                         &fd_base, NULL);
+    shift_collection_get_component_array(ctx, col_id, stats_id,
+                                         &st_base, NULL);
+
+    int          *fds   = (int *)fd_base + offset;
+    conn_stats_t *stats = (conn_stats_t *)st_base + offset;
+
+    for (uint32_t i = 0; i < count; i++) {
+        struct epoll_event ev = {.events = EPOLLIN, .data.fd = fds[i]};
+        epoll_ctl(epfd, EPOLL_CTL_ADD, fds[i], &ev);
+        stats[i] = (conn_stats_t){0};
+    }
+}
+
+shift_collection_on_enter(ctx, established_id, on_establish, &epfd, NULL);
+```
+
+The same pattern works in destructors. Here is an on_leave that deregisters
+fds from epoll when connections leave the established collection:
+
+```c
+void on_disconnect(shift_t *ctx, shift_collection_id_t col_id,
+                   const shift_entity_t *entities, uint32_t offset,
+                   uint32_t count, void *user_ctx) {
+    int epfd = *(int *)user_ctx;
+
+    void *fd_base;
+    shift_collection_get_component_array(ctx, col_id, sock_id,
+                                         &fd_base, NULL);
+    int *fds = (int *)fd_base + offset;
+
+    for (uint32_t i = 0; i < count; i++)
+        epoll_ctl(epfd, EPOLL_CTL_DEL, fds[i], NULL);
+}
+
+shift_collection_on_leave(ctx, established_id, on_disconnect, &epfd, NULL);
+```
+
+The key insight: `offset` and `count` describe a contiguous slice that is the
+same across the entity array and every component column. Fetch the base, add
+the offset, loop over count. That's it. No per-entity indirection, no handle
+validation overhead, just linear memory access — which is exactly what the
+hardware prefetcher wants to see.
+
+This matters when your callbacks fire on hundreds or thousands of entities per
+flush. A constructor that zero-inits 4096 stats structs at `data + offset` is
+a single `memset`. An on_enter that registers 200 fds with epoll is a tight
+loop with no branches except the syscall. The batching in `shift_flush` groups
+contiguous operations together so you get these large runs for free.
 
 ## Design notes
 

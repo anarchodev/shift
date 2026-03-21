@@ -397,16 +397,20 @@ void test_move_flush(void) {
 
 static int  g_ctor_count      = 0;
 static int  g_ctor_call_count = 0;
-static void counting_ctor(void *data, uint32_t count) {
-  (void)data;
+static void counting_ctor(shift_t *ctx, shift_collection_id_t col_id,
+                           const shift_entity_t *entities, void *data,
+                           uint32_t offset, uint32_t count) {
+  (void)ctx; (void)col_id; (void)entities; (void)data; (void)offset;
   g_ctor_count += (int)count;
   g_ctor_call_count++;
 }
 
 static int  g_dtor_count      = 0;
 static int  g_dtor_call_count = 0;
-static void counting_dtor(void *data, uint32_t count) {
-  (void)data;
+static void counting_dtor(shift_t *ctx, shift_collection_id_t col_id,
+                           const shift_entity_t *entities, void *data,
+                           uint32_t offset, uint32_t count) {
+  (void)ctx; (void)col_id; (void)entities; (void)data; (void)offset;
   g_dtor_count += (int)count;
   g_dtor_call_count++;
 }
@@ -614,17 +618,17 @@ void test_max_collections_unaffected(void) {
 static int g_enter_count = 0;
 static int g_leave_count = 0;
 
-static void test_on_enter_cb(const shift_entity_t *entities, uint32_t count,
-                             void *user_ctx) {
-  (void)entities;
-  (void)user_ctx;
+static void test_on_enter_cb(shift_t *ctx, shift_collection_id_t col_id,
+                             const shift_entity_t *entities, uint32_t offset,
+                             uint32_t count, void *user_ctx) {
+  (void)ctx; (void)col_id; (void)entities; (void)offset; (void)user_ctx;
   g_enter_count += (int)count;
 }
 
-static void test_on_leave_cb(const shift_entity_t *entities, uint32_t count,
-                             void *user_ctx) {
-  (void)entities;
-  (void)user_ctx;
+static void test_on_leave_cb(shift_t *ctx, shift_collection_id_t col_id,
+                             const shift_entity_t *entities, uint32_t offset,
+                             uint32_t count, void *user_ctx) {
+  (void)ctx; (void)col_id; (void)entities; (void)offset; (void)user_ctx;
   g_leave_count += (int)count;
 }
 
@@ -1419,13 +1423,15 @@ void test_entity_move_batch_partial_stale_no_side_effects(void) {
 
 static uint32_t g_on_leave_recorded_value;
 
-static void on_leave_reads_component(const shift_entity_t *entities,
-                                     uint32_t count, void *user_ctx) {
-  shift_t *ctx = (shift_t *)user_ctx;
+static void on_leave_reads_component(shift_t *ctx, shift_collection_id_t col_id,
+                                     const shift_entity_t *entities,
+                                     uint32_t offset, uint32_t count,
+                                     void *user_ctx) {
+  (void)col_id; (void)user_ctx;
   TEST_ASSERT_EQUAL_UINT32(1, count);
   shift_component_id_t comp_id = 0; /* only one component registered */
   void                *ptr     = NULL;
-  shift_result_t       r = shift_entity_get_component(ctx, entities[0],
+  shift_result_t       r = shift_entity_get_component(ctx, entities[offset],
                                                       comp_id, &ptr);
   TEST_ASSERT_EQUAL_INT(shift_ok, r);
   TEST_ASSERT_NOT_NULL(ptr);
@@ -1453,7 +1459,7 @@ void test_on_leave_can_access_source_component(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_leave(ctx, col_src,
                                                   on_leave_reads_component,
-                                                  ctx, NULL));
+                                                  NULL, NULL));
   shift_collection_id_t col_dst;
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
@@ -2048,16 +2054,22 @@ static int g_handler_a_count = 0;
 static int g_handler_b_count = 0;
 static int g_handler_c_count = 0;
 
-static void handler_a(const shift_entity_t *e, uint32_t c, void *u) {
-  (void)e; (void)c; (void)u;
+static void handler_a(shift_t *ctx, shift_collection_id_t col_id,
+                      const shift_entity_t *e, uint32_t offset,
+                      uint32_t c, void *u) {
+  (void)ctx; (void)col_id; (void)e; (void)offset; (void)c; (void)u;
   g_handler_a_count++;
 }
-static void handler_b(const shift_entity_t *e, uint32_t c, void *u) {
-  (void)e; (void)c; (void)u;
+static void handler_b(shift_t *ctx, shift_collection_id_t col_id,
+                      const shift_entity_t *e, uint32_t offset,
+                      uint32_t c, void *u) {
+  (void)ctx; (void)col_id; (void)e; (void)offset; (void)c; (void)u;
   g_handler_b_count++;
 }
-static void handler_c(const shift_entity_t *e, uint32_t c, void *u) {
-  (void)e; (void)c; (void)u;
+static void handler_c(shift_t *ctx, shift_collection_id_t col_id,
+                      const shift_entity_t *e, uint32_t offset,
+                      uint32_t c, void *u) {
+  (void)ctx; (void)col_id; (void)e; (void)offset; (void)c; (void)u;
   g_handler_c_count++;
 }
 
@@ -2115,16 +2127,22 @@ void test_handler_remove(void) {
 static int g_fire_order[4];
 static int g_fire_order_idx = 0;
 
-static void order_a(const shift_entity_t *e, uint32_t c, void *u) {
-  (void)e; (void)c; (void)u;
+static void order_a(shift_t *ctx, shift_collection_id_t col_id,
+                    const shift_entity_t *e, uint32_t offset,
+                    uint32_t c, void *u) {
+  (void)ctx; (void)col_id; (void)e; (void)offset; (void)c; (void)u;
   g_fire_order[g_fire_order_idx++] = 1;
 }
-static void order_b(const shift_entity_t *e, uint32_t c, void *u) {
-  (void)e; (void)c; (void)u;
+static void order_b(shift_t *ctx, shift_collection_id_t col_id,
+                    const shift_entity_t *e, uint32_t offset,
+                    uint32_t c, void *u) {
+  (void)ctx; (void)col_id; (void)e; (void)offset; (void)c; (void)u;
   g_fire_order[g_fire_order_idx++] = 2;
 }
-static void order_c(const shift_entity_t *e, uint32_t c, void *u) {
-  (void)e; (void)c; (void)u;
+static void order_c(shift_t *ctx, shift_collection_id_t col_id,
+                    const shift_entity_t *e, uint32_t offset,
+                    uint32_t c, void *u) {
+  (void)ctx; (void)col_id; (void)e; (void)offset; (void)c; (void)u;
   g_fire_order[g_fire_order_idx++] = 3;
 }
 
@@ -2171,9 +2189,10 @@ void test_handler_remove_not_found(void) {
   shift_context_destroy(ctx);
 }
 
-static void user_ctx_cb(const shift_entity_t *entities, uint32_t count,
-                        void *user_ctx) {
-  (void)entities;
+static void user_ctx_cb(shift_t *ctx, shift_collection_id_t col_id,
+                        const shift_entity_t *entities, uint32_t offset,
+                        uint32_t count, void *user_ctx) {
+  (void)ctx; (void)col_id; (void)entities; (void)offset;
   *(int *)user_ctx += (int)count;
 }
 
@@ -2241,10 +2260,11 @@ void test_create_begin_end_basic(void) {
 }
 
 static int g_begin_end_enter_count;
-static void begin_end_on_enter_cb(const shift_entity_t *entities, uint32_t cnt,
+static void begin_end_on_enter_cb(shift_t *ctx, shift_collection_id_t col_id,
+                                  const shift_entity_t *entities,
+                                  uint32_t offset, uint32_t cnt,
                                   void *user_ctx) {
-  (void)entities;
-  (void)user_ctx;
+  (void)ctx; (void)col_id; (void)entities; (void)offset; (void)user_ctx;
   g_begin_end_enter_count += (int)cnt;
 }
 
@@ -2347,8 +2367,11 @@ void test_create_begin_rejects_move(void) {
 }
 
 static int g_begin_ctor_count;
-static void begin_ctor(void *data, uint32_t count) {
-  int *vals = (int *)data;
+static void begin_ctor(shift_t *ctx, shift_collection_id_t col_id,
+                       const shift_entity_t *entities, void *data,
+                       uint32_t offset, uint32_t count) {
+  (void)ctx; (void)col_id; (void)entities;
+  int *vals = (int *)data + offset;
   for (uint32_t i = 0; i < count; i++)
     vals[i] = 999;
   g_begin_ctor_count += (int)count;

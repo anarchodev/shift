@@ -90,10 +90,14 @@ static shift_result_t handler_list_remove(shift_t *ctx,
 }
 
 static void handler_list_fire(const shift_handler_list_t *list,
+                               shift_t *ctx,
+                               shift_collection_id_t col_id,
                                const shift_entity_t *entities,
+                               uint32_t offset,
                                uint32_t count) {
   for (uint32_t i = 0; i < list->count; i++)
-    list->entries[i].fn(entities, count, list->entries[i].user_ctx);
+    list->entries[i].fn(ctx, col_id, entities, offset, count,
+                        list->entries[i].user_ctx);
 }
 
 static void handler_list_free(shift_t *ctx, shift_handler_list_t *list) {
@@ -109,11 +113,16 @@ static void handler_list_free(shift_t *ctx, shift_handler_list_t *list) {
  * entity's null-pool slot
  * -------------------------------------------------------------------------- */
 
-static void null_collection_on_enter(const shift_entity_t *entities,
-                                     uint32_t count, void *user_ctx) {
-  shift_t *ctx = (shift_t *)user_ctx;
+static void null_collection_on_enter(shift_t               *ctx,
+                                     shift_collection_id_t  col_id,
+                                     const shift_entity_t  *entities,
+                                     uint32_t               offset,
+                                     uint32_t               count,
+                                     void                  *user_ctx) {
+  (void)col_id;
+  (void)user_ctx;
   for (uint32_t i = 0; i < count; i++) {
-    shift_entity_t    entity = entities[i];
+    shift_entity_t    entity = entities[offset + i];
     shift_metadata_t *m      = &ctx->metadata[entity.index];
     m->generation++;
     ctx->collections[0].entity_ids[m->offset] =
@@ -781,13 +790,13 @@ shift_result_t shift_entity_create_immediate(shift_t              *ctx,
   for (uint32_t c = 0; c < dest->component_count; c++) {
     shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
     if (ci->constructor)
-      ci->constructor((char *)dest->columns[c] + dest_base * ci->element_size,
-                      count);
+      ci->constructor(ctx, dest_col_id, dest->entity_ids,
+                      dest->columns[c], dest_base, count);
   }
 
   /* Fire on_enter immediately. */
-  handler_list_fire(&dest->on_enter_handlers, &dest->entity_ids[dest_base],
-                    count);
+  handler_list_fire(&dest->on_enter_handlers, ctx, dest_col_id,
+                    dest->entity_ids, dest_base, count);
 
   /* Remove from null pool immediately. */
   col_remove_run(ctx, null_col, null_base, count);
@@ -873,18 +882,18 @@ shift_result_t shift_entity_move_immediate(shift_t              *ctx,
     }
 
     /* Destruct dropped components. */
+    shift_collection_id_t src_col_id = m->col_id;
     for (uint32_t c = 0; c < recipe->destruct_count; c++) {
       shift_recipe_xtor_t    *e  = &recipe->destruct[c];
       shift_component_info_t *ce = &ctx->components[e->comp_id];
       if (ce->destructor)
-        ce->destructor((char *)src->columns[e->col_idx] +
-                           src_offset * ce->element_size,
-                       1);
+        ce->destructor(ctx, src_col_id, src->entity_ids,
+                       src->columns[e->col_idx], src_offset, 1);
     }
 
     /* Fire on_leave (entity still addressable in src). */
-    handler_list_fire(&src->on_leave_handlers, &src->entity_ids[src_offset],
-                      1);
+    handler_list_fire(&src->on_leave_handlers, ctx, src_col_id,
+                      src->entity_ids, src_offset, 1);
 
     /* Place entity in dest + update metadata. */
     dest->entity_ids[dest_base] = src->entity_ids[src_offset];
@@ -897,14 +906,13 @@ shift_result_t shift_entity_move_immediate(shift_t              *ctx,
       shift_recipe_xtor_t    *e  = &recipe->construct[c];
       shift_component_info_t *ce = &ctx->components[e->comp_id];
       if (ce->constructor)
-        ce->constructor((char *)dest->columns[e->col_idx] +
-                            dest_base * ce->element_size,
-                        1);
+        ce->constructor(ctx, dest_col_id, dest->entity_ids,
+                        dest->columns[e->col_idx], dest_base, 1);
     }
 
     /* Fire on_enter. */
-    handler_list_fire(&dest->on_enter_handlers, &dest->entity_ids[dest_base],
-                      1);
+    handler_list_fire(&dest->on_enter_handlers, ctx, dest_col_id,
+                      dest->entity_ids, dest_base, 1);
 
     /* Remove from src (swap-remove). */
     col_remove_run(ctx, src, src_offset, 1);
@@ -984,8 +992,8 @@ shift_result_t shift_entity_create_begin(shift_t              *ctx,
   for (uint32_t c = 0; c < dest->component_count; c++) {
     shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
     if (ci->constructor)
-      ci->constructor((char *)dest->columns[c] + dest_base * ci->element_size,
-                      count);
+      ci->constructor(ctx, dest_col_id, dest->entity_ids,
+                      dest->columns[c], dest_base, count);
   }
 
   /* Remove from null pool immediately. */
@@ -1049,7 +1057,8 @@ shift_result_t shift_entity_create_end(shift_t              *ctx,
   col->begun_count -= count;
 
   /* Fire on_enter now that entities are fully visible. */
-  handler_list_fire(&col->on_enter_handlers, &col->entity_ids[base], count);
+  handler_list_fire(&col->on_enter_handlers, ctx, col_id,
+                    col->entity_ids, base, count);
 
   return shift_ok;
 }
@@ -1118,13 +1127,14 @@ static inline void flush_batch(shift_t *ctx, shift_batch_t *b) {
   if (b->count == 0)
     return;
   shift_migration_recipe_t *recipe = &ctx->migration_recipes[b->recipe_idx];
+  shift_collection_id_t dst_col_id =
+      (shift_collection_id_t)(b->dst - ctx->collections);
   for (uint32_t c = 0; c < recipe->construct_count; c++) {
     shift_recipe_xtor_t    *e  = &recipe->construct[c];
     shift_component_info_t *ce = &ctx->components[e->comp_id];
     if (ce->constructor)
-      ce->constructor((char *)b->dst->columns[e->col_idx] +
-                          b->base * ce->element_size,
-                      b->count);
+      ce->constructor(ctx, dst_col_id, b->dst->entity_ids,
+                      b->dst->columns[e->col_idx], b->base, b->count);
   }
   b->recipe_idx = UINT32_MAX;
   b->dst        = NULL;
@@ -1347,9 +1357,8 @@ shift_result_t shift_flush(shift_t *ctx) {
       shift_recipe_xtor_t    *e  = &recipe->destruct[c];
       shift_component_info_t *ce = &ctx->components[e->comp_id];
       if (ce->destructor)
-        ce->destructor((char *)src->columns[e->col_idx] +
-                           op->src_offset * ce->element_size,
-                       op->count);
+        ce->destructor(ctx, op->src_col_id, src->entity_ids,
+                       src->columns[e->col_idx], op->src_offset, op->count);
     }
 
     /*
@@ -1375,20 +1384,22 @@ shift_result_t shift_flush(shift_t *ctx) {
       ctx->metadata[e.index].has_pending_move = false;
     }
 
-    handler_list_fire(&src->on_leave_handlers, &src->entity_ids[op->src_offset],
-                      op->count);
+    handler_list_fire(&src->on_leave_handlers, ctx, op->src_col_id,
+                      src->entity_ids, op->src_offset, op->count);
 
     /* Loop B: copy entity handles to dst, update col_id and offset */
+    shift_collection_id_t dst_col_id =
+        (shift_collection_id_t)(dst - ctx->collections);
     for (uint32_t r = 0; r < op->count; r++) {
       shift_entity_t    e = src->entity_ids[op->src_offset + r];
       shift_metadata_t *m = &ctx->metadata[e.index];
       dst->entity_ids[dest_base + r] = e;
-      m->col_id = (shift_collection_id_t)(dst - ctx->collections);
+      m->col_id = dst_col_id;
       m->offset = dest_base + r;
     }
 
-    handler_list_fire(&dst->on_enter_handlers, &dst->entity_ids[dest_base],
-                      op->count);
+    handler_list_fire(&dst->on_enter_handlers, ctx, dst_col_id,
+                      dst->entity_ids, dest_base, op->count);
 
     dst->count += op->count;
     batch.count += op->count;
