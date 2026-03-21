@@ -659,6 +659,7 @@ shift_result_t shift_entity_create_immediate(shift_t              *ctx,
     shift_entity_t    e = null_col->entity_ids[null_base + i];
     shift_metadata_t *m = &ctx->metadata[e.index];
     dest->entity_ids[dest_base + i] = e;
+    m->has_pending_move = false;
     m->col_id = dest_col_id;
     m->offset = dest_base + i;
   }
