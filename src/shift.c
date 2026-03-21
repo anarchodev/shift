@@ -2,6 +2,7 @@
 #include "shift_internal.h"
 
 #include <assert.h>
+#include <stdalign.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -41,6 +42,53 @@ static inline void sfree(shift_t *ctx, void *ptr) {
 }
 static inline void *srealloc(shift_t *ctx, void *ptr, size_t sz) {
   return ctx->allocator.realloc(ptr, sz, ctx->allocator.ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * Aligned allocation helpers
+ *
+ * If the user provides aligned_alloc/aligned_realloc/aligned_free, use them.
+ * Otherwise, over-allocate and manually align.  We stash the original pointer
+ * in the bytes immediately before the aligned pointer.
+ * -------------------------------------------------------------------------- */
+
+static inline size_t resolve_alignment(size_t requested) {
+  return requested ? requested : alignof(max_align_t);
+}
+
+/* Manual fallback: over-allocate, align, store original pointer. */
+static void *manual_aligned_alloc(shift_t *ctx, size_t sz, size_t align) {
+  /* Need space for the original pointer plus up to (align-1) padding. */
+  size_t overhead = sizeof(void *) + align - 1;
+  void  *raw      = salloc(ctx, sz + overhead);
+  if (!raw)
+    return NULL;
+  uintptr_t addr    = (uintptr_t)raw + sizeof(void *);
+  uintptr_t aligned = (addr + align - 1) & ~(align - 1);
+  ((void **)aligned)[-1] = raw;
+  return (void *)aligned;
+}
+
+static void manual_aligned_free(shift_t *ctx, void *ptr) {
+  if (!ptr)
+    return;
+  void *raw = ((void **)ptr)[-1];
+  sfree(ctx, raw);
+}
+
+static inline void *salloc_aligned(shift_t *ctx, size_t sz, size_t align) {
+  if (ctx->allocator.aligned_alloc)
+    return ctx->allocator.aligned_alloc(sz, align, ctx->allocator.ctx);
+  return manual_aligned_alloc(ctx, sz, align);
+}
+
+static inline void sfree_aligned(shift_t *ctx, void *ptr, size_t align) {
+  (void)align;
+  if (ctx->allocator.aligned_free) {
+    ctx->allocator.aligned_free(ptr, ctx->allocator.ctx);
+    return;
+  }
+  manual_aligned_free(ctx, ptr);
 }
 
 /* --------------------------------------------------------------------------
@@ -170,6 +218,13 @@ shift_result_t shift_context_create(const shift_config_t *config,
   memset(ctx->components, 0,
          sizeof(shift_component_info_t) * ctx->max_components);
 
+  ctx->comp_collections =
+      salloc(ctx, sizeof(shift_comp_collections_t) * ctx->max_components);
+  if (!ctx->comp_collections)
+    goto oom;
+  memset(ctx->comp_collections, 0,
+         sizeof(shift_comp_collections_t) * ctx->max_components);
+
   ctx->collections =
       salloc(ctx, sizeof(shift_collection_entry_t) * ctx->max_collections);
   if (!ctx->collections)
@@ -219,6 +274,8 @@ shift_result_t shift_context_create(const shift_config_t *config,
 oom:
   if (ctx->metadata)
     sfree(ctx, ctx->metadata);
+  if (ctx->comp_collections)
+    sfree(ctx, ctx->comp_collections);
   if (ctx->components)
     sfree(ctx, ctx->components);
   if (ctx->collections) {
@@ -238,20 +295,26 @@ void shift_context_destroy(shift_t *ctx) {
   if (!ctx)
     return;
 
-  /* Free per-collection owned arrays */
+  /* Free per-collection owned arrays — columns before component_ids since
+   * freeing aligned columns needs to look up alignment via component_ids. */
   for (size_t i = 0; i < ctx->collection_count; i++) {
     shift_collection_entry_t *col = &ctx->collections[i];
+    if (col->columns) {
+      for (uint32_t c = 0; c < col->component_count; c++) {
+        if (col->columns[c]) {
+          size_t align = ctx->components[col->component_ids[c]].alignment;
+          if (align > alignof(max_align_t))
+            sfree_aligned(ctx, col->columns[c], align);
+          else
+            sfree(ctx, col->columns[c]);
+        }
+      }
+      sfree(ctx, col->columns);
+    }
     if (col->component_ids)
       sfree(ctx, col->component_ids);
     if (col->entity_ids)
       sfree(ctx, col->entity_ids);
-    if (col->columns) {
-      for (uint32_t c = 0; c < col->component_count; c++) {
-        if (col->columns[c])
-          sfree(ctx, col->columns[c]);
-      }
-      sfree(ctx, col->columns);
-    }
     handler_list_free(ctx, &col->on_enter_handlers);
     handler_list_free(ctx, &col->on_leave_handlers);
   }
@@ -267,6 +330,15 @@ void shift_context_destroy(shift_t *ctx) {
   }
   if (ctx->migration_recipes)
     sfree(ctx, ctx->migration_recipes);
+
+  if (ctx->comp_collections) {
+    shift_comp_collections_t *cc = ctx->comp_collections;
+    for (uint32_t i = 0; i < ctx->component_count; i++) {
+      if (cc[i].ids)
+        sfree(ctx, cc[i].ids);
+    }
+    sfree(ctx, ctx->comp_collections);
+  }
 
   sfree(ctx, ctx->max_src_offset);
   sfree(ctx, ctx->deferred_queue);
@@ -295,6 +367,9 @@ shift_result_t shift_component_register(shift_t                      *ctx,
 
   shift_component_id_t id = ctx->component_count;
   ctx->components[id]     = *info;
+  /* Resolve alignment: 0 means default. Must be a power of two. */
+  if (ctx->components[id].alignment == 0)
+    ctx->components[id].alignment = alignof(max_align_t);
   ctx->component_count++;
 
   *out_id = id;
@@ -386,6 +461,26 @@ shift_result_t shift_collection_register(shift_t                       *ctx,
     }
   }
 
+  /* Update reverse index: component -> collections */
+  shift_comp_collections_t *cc = ctx->comp_collections;
+  for (uint32_t i = 0; i < col->component_count; i++) {
+    shift_comp_collections_t *entry = &cc[col->component_ids[i]];
+    if (entry->count == entry->capacity) {
+      uint32_t new_cap = entry->capacity == 0 ? 4 : entry->capacity * 2;
+      size_t bytes = sizeof(shift_collection_id_t) * new_cap;
+      shift_collection_id_t *new_ids;
+      if (entry->ids)
+        new_ids = srealloc(ctx, entry->ids, bytes);
+      else
+        new_ids = salloc(ctx, bytes);
+      if (!new_ids)
+        return shift_error_oom;
+      entry->ids      = new_ids;
+      entry->capacity = new_cap;
+    }
+    entry->ids[entry->count++] = id;
+  }
+
   ctx->collection_count++;
   *out_id = id;
   return shift_ok;
@@ -474,6 +569,66 @@ shift_result_t shift_collection_remove_handler(shift_t              *ctx,
 }
 
 /* --------------------------------------------------------------------------
+ * New introspection / foundation APIs
+ * -------------------------------------------------------------------------- */
+
+size_t shift_collection_entity_count(const shift_t         *ctx,
+                                     shift_collection_id_t  col_id) {
+  if (!ctx || col_id >= ctx->collection_count)
+    return 0;
+  return ctx->collections[col_id].count;
+}
+
+shift_result_t shift_collection_get_components(
+    const shift_t *ctx, shift_collection_id_t col_id,
+    const shift_component_id_t **out_ids, uint32_t *out_count) {
+  if (!ctx || !out_ids || !out_count)
+    return shift_error_null;
+  if (col_id >= ctx->collection_count)
+    return shift_error_not_found;
+  const shift_collection_entry_t *col = &ctx->collections[col_id];
+  *out_ids   = col->component_ids;
+  *out_count = col->component_count;
+  return shift_ok;
+}
+
+shift_result_t shift_component_get_user_data(const shift_t        *ctx,
+                                             shift_component_id_t  comp_id,
+                                             void                **out_data) {
+  if (!ctx || !out_data)
+    return shift_error_null;
+  if (comp_id >= ctx->component_count)
+    return shift_error_not_found;
+  *out_data = ctx->components[comp_id].user_data;
+  return shift_ok;
+}
+
+shift_result_t shift_component_get_collections(
+    const shift_t *ctx, shift_component_id_t comp_id,
+    const shift_collection_id_t **out_ids, size_t *out_count) {
+  if (!ctx || !out_ids || !out_count)
+    return shift_error_null;
+  if (comp_id >= ctx->component_count)
+    return shift_error_not_found;
+  const shift_comp_collections_t *cc =
+      &((const shift_comp_collections_t *)ctx->comp_collections)[comp_id];
+  *out_ids   = cc->ids;
+  *out_count = cc->count;
+  return shift_ok;
+}
+
+shift_result_t shift_collection_reserve(shift_t              *ctx,
+                                        shift_collection_id_t col_id,
+                                        size_t                capacity) {
+  if (!ctx)
+    return shift_error_null;
+  shift_collection_entry_t *col = find_collection(ctx, col_id);
+  if (!col)
+    return shift_error_not_found;
+  return col_grow(ctx, col, capacity);
+}
+
+/* --------------------------------------------------------------------------
  * Internal SoA helpers
  * -------------------------------------------------------------------------- */
 
@@ -519,11 +674,25 @@ static shift_result_t col_grow(shift_t *ctx, shift_collection_entry_t *col,
   col->entity_ids = new_eids;
 
   for (uint32_t i = 0; i < col->component_count; i++) {
-    size_t elem    = ctx->components[col->component_ids[i]].element_size;
-    void  *new_col = srealloc(ctx, col->columns[i], elem * new_cap);
-    if (!new_col)
-      return shift_error_oom;
-    col->columns[i] = new_col;
+    shift_component_info_t *ci  = &ctx->components[col->component_ids[i]];
+    size_t                  elem  = ci->element_size;
+    size_t                  align = ci->alignment;
+    if (align > alignof(max_align_t)) {
+      /* Need aligned allocation — alloc new, copy old, free old. */
+      void *new_col = salloc_aligned(ctx, elem * new_cap, align);
+      if (!new_col)
+        return shift_error_oom;
+      if (col->columns[i] && col->capacity > 0)
+        memcpy(new_col, col->columns[i], elem * col->capacity);
+      if (col->columns[i])
+        sfree_aligned(ctx, col->columns[i], align);
+      col->columns[i] = new_col;
+    } else {
+      void *new_col = srealloc(ctx, col->columns[i], elem * new_cap);
+      if (!new_col)
+        return shift_error_oom;
+      col->columns[i] = new_col;
+    }
   }
 
   col->capacity = new_cap;

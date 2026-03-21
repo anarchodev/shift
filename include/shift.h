@@ -103,6 +103,9 @@ typedef struct {
   void *(*alloc)(size_t size, void *ctx);
   void *(*realloc)(void *ptr, size_t size, void *ctx);
   void (*free)(void *ptr, void *ctx);
+  void *(*aligned_alloc)(size_t size, size_t alignment, void *ctx);
+  void *(*aligned_realloc)(void *ptr, size_t size, size_t alignment, void *ctx);
+  void (*aligned_free)(void *ptr, void *ctx);
   void *ctx;
 } shift_allocator_t;
 
@@ -111,9 +114,11 @@ typedef struct {
  * -------------------------------------------------------------------------- */
 
 typedef struct {
-  size_t               element_size;
+  size_t                 element_size;
+  size_t                 alignment; /* 0 = default (alignof(max_align_t)) */
   shift_component_ctor_t constructor;
   shift_component_dtor_t destructor;
+  void                  *user_data; /* opaque, stored and returned as-is */
 } shift_component_info_t;
 
 /* --------------------------------------------------------------------------
@@ -157,9 +162,10 @@ struct shift_s {
   shift_metadata_t         *metadata; /* [max_entities] */
   size_t                    max_entities;
   size_t                    null_front;
-  shift_component_info_t   *components; /* [max_components] */
+  shift_component_info_t   *components;      /* [max_components] */
   size_t                    max_components;
   uint32_t                  component_count;
+  void                     *comp_collections; /* [max_components] internal */
   shift_collection_entry_t *collections; /* [max_collections] */
   size_t                    max_collections;
   size_t                    collection_count;
@@ -212,6 +218,31 @@ void           shift_context_destroy(shift_t *ctx);
 shift_result_t shift_component_register(shift_t                      *ctx,
                                         const shift_component_info_t *info,
                                         shift_component_id_t         *out_id);
+
+/**
+ * Get the user_data pointer stored at component registration time.
+ *
+ * @param ctx        The shift context.
+ * @param comp_id    Component ID.
+ * @param out_data   Receives the user_data pointer.
+ * @return shift_ok, shift_error_null, or shift_error_not_found.
+ */
+shift_result_t shift_component_get_user_data(const shift_t        *ctx,
+                                             shift_component_id_t  comp_id,
+                                             void                **out_data);
+
+/**
+ * Get the list of collections that contain a given component.
+ *
+ * @param ctx        The shift context.
+ * @param comp_id    Component ID.
+ * @param out_ids    Receives a read-only pointer to the collection ID array.
+ * @param out_count  Receives the number of collection IDs.
+ * @return shift_ok, shift_error_null, or shift_error_not_found.
+ */
+shift_result_t shift_component_get_collections(
+    const shift_t *ctx, shift_component_id_t comp_id,
+    const shift_collection_id_t **out_ids, size_t *out_count);
 
 /* --------------------------------------------------------------------------
  * Collection info and registration
@@ -266,6 +297,21 @@ shift_result_t shift_collection_get_entities(shift_t              *ctx,
                                              shift_collection_id_t col_id,
                                              shift_entity_t      **out_entities,
                                              size_t               *out_count);
+
+/**
+ * Pre-allocate storage for at least capacity entities in a collection.
+ * Avoids incremental reallocation when bulk-loading a known number of
+ * entities.  Respects max_capacity if set at registration time.
+ *
+ * @param ctx       The shift context.
+ * @param col_id    Target collection.
+ * @param capacity  Minimum number of entity slots to allocate.
+ * @return shift_ok, shift_error_null, shift_error_not_found, shift_error_full,
+ *         or shift_error_oom.
+ */
+shift_result_t shift_collection_reserve(shift_t              *ctx,
+                                        shift_collection_id_t col_id,
+                                        size_t                capacity);
 
 /* --------------------------------------------------------------------------
  * Collection callbacks — add/remove on_enter and on_leave handlers.
@@ -614,6 +660,46 @@ shift_result_t shift_entity_revoke(shift_t        *ctx,
  * @return shift_ok, shift_error_null, or shift_error_oom.
  */
 shift_result_t shift_flush(shift_t *ctx);
+
+/* --------------------------------------------------------------------------
+ * Collection introspection
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Get the number of registered collections (including the internal null
+ * collection at index 0).  User-created collections have IDs 1 through
+ * shift_collection_count(ctx) - 1.
+ *
+ * @param ctx  The shift context (NULL returns 0).
+ * @return Total collection count, or 0 if ctx is NULL.
+ */
+static inline size_t shift_collection_count(const shift_t *ctx) {
+  return ctx ? ctx->collection_count : 0;
+}
+
+/**
+ * Get the number of live entities in a collection.
+ *
+ * @param ctx     The shift context.
+ * @param col_id  Target collection.
+ * @return Entity count, or 0 if ctx is NULL or col_id is out of range.
+ */
+size_t shift_collection_entity_count(const shift_t         *ctx,
+                                     shift_collection_id_t  col_id);
+
+/**
+ * Get the sorted component ID list for a collection.
+ *
+ * @param ctx       The shift context.
+ * @param col_id    Target collection.
+ * @param out_ids   Receives a read-only pointer to the sorted component ID
+ *                  array.  Valid for the lifetime of the context.
+ * @param out_count Receives the number of component IDs.
+ * @return shift_ok, shift_error_null, or shift_error_not_found.
+ */
+shift_result_t shift_collection_get_components(
+    const shift_t *ctx, shift_collection_id_t col_id,
+    const shift_component_id_t **out_ids, uint32_t *out_count);
 
 /* --------------------------------------------------------------------------
  * Inline entity state queries

@@ -1,5 +1,6 @@
 #include "unity.h"
 #include "shift.h"
+#include <stdint.h>
 #include <stdlib.h>
 
 /* --------------------------------------------------------------------------
@@ -2426,6 +2427,237 @@ void test_create_begin_end_invalid(void) {
 }
 
 /* --------------------------------------------------------------------------
+ * Foundation layer tests (introspection, reserve, reverse index, alignment)
+ * -------------------------------------------------------------------------- */
+
+void test_collection_count(void) {
+  shift_t *ctx = make_ctx();
+  /* 1 = null collection at index 0. */
+  TEST_ASSERT_EQUAL(1, shift_collection_count(ctx));
+
+  SHIFT_COMPONENT(ctx, pos, float);
+  SHIFT_COLLECTION(ctx, col, pos);
+  TEST_ASSERT_EQUAL(2, shift_collection_count(ctx));
+
+  SHIFT_COLLECTION_EMPTY(ctx, col2);
+  TEST_ASSERT_EQUAL(3, shift_collection_count(ctx));
+  (void)col;
+  (void)col2;
+  shift_context_destroy(ctx);
+}
+
+void test_collection_entity_count(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, hp, uint32_t);
+  SHIFT_COLLECTION(ctx, col, hp);
+
+  TEST_ASSERT_EQUAL(0, shift_collection_entity_count(ctx, col));
+
+  shift_entity_t *ep;
+  shift_entity_create_immediate(ctx, 3, col, &ep);
+  TEST_ASSERT_EQUAL(3, shift_collection_entity_count(ctx, col));
+
+  /* Out of range returns 0. */
+  TEST_ASSERT_EQUAL(0, shift_collection_entity_count(ctx, 999));
+  TEST_ASSERT_EQUAL(0, shift_collection_entity_count(NULL, col));
+
+  shift_context_destroy(ctx);
+}
+
+void test_collection_get_components(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, a, float);
+  SHIFT_COMPONENT(ctx, b, uint32_t);
+  SHIFT_COLLECTION(ctx, col, a, b);
+
+  const shift_component_id_t *ids;
+  uint32_t                    count;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_components(ctx, col, &ids, &count));
+  TEST_ASSERT_EQUAL_UINT32(2, count);
+  /* IDs are sorted. */
+  TEST_ASSERT_TRUE(ids[0] < ids[1]);
+
+  /* Null checks. */
+  TEST_ASSERT_EQUAL_INT(shift_error_null,
+                        shift_collection_get_components(NULL, col, &ids, &count));
+  TEST_ASSERT_EQUAL_INT(shift_error_not_found,
+                        shift_collection_get_components(ctx, 999, &ids, &count));
+
+  shift_context_destroy(ctx);
+}
+
+void test_component_user_data(void) {
+  shift_t *ctx = make_ctx();
+  int tag = 42;
+  shift_component_id_t id;
+  shift_component_info_t info = {
+      .element_size = sizeof(float),
+      .user_data    = &tag,
+  };
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(ctx, &info, &id));
+
+  void *out = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_get_user_data(ctx, id, &out));
+  TEST_ASSERT_EQUAL_PTR(&tag, out);
+
+  /* NULL user_data is fine. */
+  shift_component_id_t id2;
+  shift_component_info_t info2 = {.element_size = sizeof(int)};
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(ctx, &info2, &id2));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_component_get_user_data(ctx, id2, &out));
+  TEST_ASSERT_NULL(out);
+
+  /* Error cases. */
+  TEST_ASSERT_EQUAL_INT(shift_error_not_found,
+                        shift_component_get_user_data(ctx, 999, &out));
+
+  shift_context_destroy(ctx);
+}
+
+void test_component_get_collections(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, pos, float);
+  SHIFT_COMPONENT(ctx, vel, float);
+
+  /* pos in two collections, vel in one. */
+  SHIFT_COLLECTION(ctx, col_a, pos, vel);
+  SHIFT_COLLECTION(ctx, col_b, pos);
+
+  const shift_collection_id_t *ids;
+  size_t                       count;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok, shift_component_get_collections(ctx, pos, &ids, &count));
+  TEST_ASSERT_EQUAL(2, count);
+  TEST_ASSERT_EQUAL_UINT32(col_a, ids[0]);
+  TEST_ASSERT_EQUAL_UINT32(col_b, ids[1]);
+
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok, shift_component_get_collections(ctx, vel, &ids, &count));
+  TEST_ASSERT_EQUAL(1, count);
+  TEST_ASSERT_EQUAL_UINT32(col_a, ids[0]);
+
+  /* Error cases. */
+  TEST_ASSERT_EQUAL_INT(
+      shift_error_not_found,
+      shift_component_get_collections(ctx, 999, &ids, &count));
+
+  shift_context_destroy(ctx);
+}
+
+void test_collection_reserve(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, hp, uint32_t);
+  SHIFT_COLLECTION(ctx, col, hp);
+
+  /* Reserve space for 32 entities, then bulk-create without triggering
+   * incremental growth. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_reserve(ctx, col, 32));
+
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_immediate(ctx, 32, col, &ep));
+  TEST_ASSERT_EQUAL(32, shift_collection_entity_count(ctx, col));
+
+  /* Error cases. */
+  TEST_ASSERT_EQUAL_INT(shift_error_null,
+                        shift_collection_reserve(NULL, col, 10));
+  TEST_ASSERT_EQUAL_INT(shift_error_not_found,
+                        shift_collection_reserve(ctx, 999, 10));
+
+  shift_context_destroy(ctx);
+}
+
+void test_collection_reserve_fixed_cap(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, hp, uint32_t);
+  SHIFT_COLLECTION_CAP(ctx, col, 8, hp);
+
+  /* Reserve within limit is fine. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_collection_reserve(ctx, col, 8));
+  /* Reserve beyond limit fails. */
+  TEST_ASSERT_EQUAL_INT(shift_error_full,
+                        shift_collection_reserve(ctx, col, 9));
+
+  shift_context_destroy(ctx);
+}
+
+void test_alignment_basic(void) {
+  shift_t *ctx = make_ctx();
+
+  /* Register a component with 64-byte alignment. */
+  shift_component_id_t comp;
+  shift_component_info_t info = {
+      .element_size = sizeof(float) * 4, /* 16 bytes */
+      .alignment    = 64,
+  };
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(ctx, &info, &comp));
+
+  shift_collection_id_t col;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx, &(shift_collection_info_t){.comp_ids = &comp, .comp_count = 1},
+          &col));
+
+  /* Create entities to force allocation. */
+  shift_entity_t *ep;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_immediate(ctx, 4, col, &ep));
+
+  /* Verify the column base pointer is 64-byte aligned. */
+  void  *base;
+  size_t count;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_get_component_array(ctx, col, comp, &base, &count));
+  TEST_ASSERT_EQUAL(4, count);
+  TEST_ASSERT_EQUAL(0, (uintptr_t)base % 64);
+
+  shift_context_destroy(ctx);
+}
+
+void test_alignment_survives_grow(void) {
+  shift_t *ctx = make_ctx();
+
+  shift_component_id_t comp;
+  shift_component_info_t info = {
+      .element_size = sizeof(float) * 4,
+      .alignment    = 32,
+  };
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_component_register(ctx, &info, &comp));
+
+  shift_collection_id_t col;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx, &(shift_collection_info_t){.comp_ids = &comp, .comp_count = 1},
+          &col));
+
+  /* Create enough entities to trigger multiple grow cycles (8 -> 16 -> 32). */
+  for (int i = 0; i < 20; i++) {
+    shift_entity_t e;
+    TEST_ASSERT_EQUAL_INT(shift_ok,
+                          shift_entity_create_one_immediate(ctx, col, &e));
+  }
+
+  void *base;
+  shift_collection_get_component_array(ctx, col, comp, &base, NULL);
+  TEST_ASSERT_EQUAL(0, (uintptr_t)base % 32);
+
+  /* Verify data survived the grows. */
+  float (*arr)[4] = base;
+  arr[0][0] = 1.0f;
+  arr[19][0] = 2.0f;
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, arr[0][0]);
+  TEST_ASSERT_EQUAL_FLOAT(2.0f, arr[19][0]);
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
  * Runner
  * -------------------------------------------------------------------------- */
 
@@ -2493,5 +2725,14 @@ int main(void) {
   RUN_TEST(test_create_begin_rejects_move);
   RUN_TEST(test_create_begin_constructor_runs);
   RUN_TEST(test_create_begin_end_invalid);
+  RUN_TEST(test_collection_count);
+  RUN_TEST(test_collection_entity_count);
+  RUN_TEST(test_collection_get_components);
+  RUN_TEST(test_component_user_data);
+  RUN_TEST(test_component_get_collections);
+  RUN_TEST(test_collection_reserve);
+  RUN_TEST(test_collection_reserve_fixed_cap);
+  RUN_TEST(test_alignment_basic);
+  RUN_TEST(test_alignment_survives_grow);
   return UNITY_END();
 }

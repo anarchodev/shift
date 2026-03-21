@@ -61,6 +61,16 @@ typedef struct {
 } shift_handler_list_t;
 
 /* --------------------------------------------------------------------------
+ * Reverse index: component -> collections that contain it
+ * -------------------------------------------------------------------------- */
+
+typedef struct {
+  shift_collection_id_t *ids;
+  uint32_t               count;
+  uint32_t               capacity;
+} shift_comp_collections_t;
+
+/* --------------------------------------------------------------------------
  * Collection (SoA storage)
  * -------------------------------------------------------------------------- */
 

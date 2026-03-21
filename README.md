@@ -9,7 +9,7 @@ A C23 library that provides an entity system and collections with deferred mutat
 **Core concepts:**
 
 - **Entities** — `{index, generation}` handles. The generation increments on destruction, making stale handles detectable.
-- **Components** — typed data blobs registered with `shift_component_register`. Each component has an `element_size` and optional `constructor`/`destructor` callbacks. All callbacks receive the context, collection ID, entity array, data pointer, offset, and count — so they can rip through SoA arrays with pointer arithmetic.
+- **Components** — typed data blobs registered with `shift_component_register`. Each component has an `element_size`, optional `alignment` for SIMD-friendly column allocation, optional `constructor`/`destructor` callbacks, and an opaque `user_data` pointer for consumer layers. All callbacks receive the context, collection ID, entity array, data pointer, offset, and count — so they can rip through SoA arrays with pointer arithmetic.
 - **Collections** — named groups that store a fixed set of components in Structure-of-Arrays layout. Entities live in exactly one collection at a time. Collections support `on_enter`/`on_leave` callbacks and optional fixed capacity.
 - **Deferred mutations** — `shift_entity_move`, `shift_entity_create`, and `shift_entity_destroy` enqueue operations. Nothing takes effect until `shift_flush()`. For cases where you need entities live immediately, `_immediate` variants bypass the queue entirely.
 - **Generation revocation** — `shift_entity_revoke` bumps an entity's generation, invalidating all existing handles without destroying the entity.
@@ -58,7 +58,7 @@ shift_t *ctx = NULL;
 shift_context_create(&cfg, &ctx);
 ```
 
-Pass a custom `shift_allocator_t` (alloc/realloc/free + user ctx pointer) to use an arena or pool allocator.
+Pass a custom `shift_allocator_t` (alloc/realloc/free + user ctx pointer) to use an arena or pool allocator. For components with custom alignment, you can optionally set `aligned_alloc`/`aligned_realloc`/`aligned_free` on the allocator — if left NULL, shift falls back to over-allocation with manual alignment.
 
 ### 2. Register components
 
@@ -66,8 +66,10 @@ Pass a custom `shift_allocator_t` (alloc/realloc/free + user ctx pointer) to use
 /* Verbose form */
 shift_component_info_t pos_info = {
     .element_size = sizeof(float) * 3,
+    .alignment    = 0,     /* 0 = default (alignof(max_align_t)) */
     .constructor  = NULL,
     .destructor   = NULL,
+    .user_data    = NULL,  /* opaque pointer for consumer layers */
 };
 shift_component_id_t pos_id;
 shift_component_register(ctx, &pos_info, &pos_id);
@@ -77,6 +79,10 @@ SHIFT_COMPONENT(ctx, pos_id, float[3]);
 SHIFT_COMPONENT(ctx, vel_id, float[3]);
 SHIFT_COMPONENT_EX(ctx, hp_id, int, hp_ctor, hp_dtor);  /* with ctor/dtor */
 ```
+
+Set `alignment` to a power-of-two value when the component will be processed with SIMD intrinsics (e.g. 16 for SSE, 32 for AVX, 64 for AVX-512). The SoA column base pointer returned by `shift_collection_get_component_array` is guaranteed to satisfy this alignment. When left as 0 the alignment defaults to `alignof(max_align_t)`, which is what `malloc` provides.
+
+The `user_data` pointer is stored as-is and retrievable via `shift_component_get_user_data`. Consumer layers can use it to attach type metadata, tag flags, custom copy semantics, or whatever else they need — keyed by component ID without maintaining parallel arrays.
 
 `constructor` and `destructor` follow the same signature pattern as all shift callbacks:
 
@@ -280,6 +286,15 @@ void           shift_context_destroy(shift_t *ctx);
 shift_result_t shift_component_register(shift_t *ctx,
                                          const shift_component_info_t *info,
                                          shift_component_id_t *out_id);
+
+shift_result_t shift_component_get_user_data(const shift_t *ctx,
+                                              shift_component_id_t comp_id,
+                                              void **out_data);
+
+shift_result_t shift_component_get_collections(const shift_t *ctx,
+                                                shift_component_id_t comp_id,
+                                                const shift_collection_id_t **out_ids,
+                                                size_t *out_count);
 ```
 
 ### Collections
@@ -294,6 +309,24 @@ shift_result_t shift_collection_get_component_array(shift_t *ctx,
                                                      shift_component_id_t comp_id,
                                                      void **out_array,
                                                      size_t *out_count);
+
+shift_result_t shift_collection_get_entities(shift_t *ctx,
+                                              shift_collection_id_t col_id,
+                                              shift_entity_t **out_entities,
+                                              size_t *out_count);
+
+shift_result_t shift_collection_get_components(const shift_t *ctx,
+                                                shift_collection_id_t col_id,
+                                                const shift_component_id_t **out_ids,
+                                                uint32_t *out_count);
+
+shift_result_t shift_collection_reserve(shift_t *ctx,
+                                         shift_collection_id_t col_id,
+                                         size_t capacity);
+
+size_t shift_collection_count(const shift_t *ctx);            /* inline */
+size_t shift_collection_entity_count(const shift_t *ctx,
+                                      shift_collection_id_t col_id);
 ```
 
 ### Entities (deferred)
@@ -673,6 +706,146 @@ flush. A constructor that zero-inits 4096 stats structs at `data + offset` is
 a single `memset`. An on_enter that registers 200 fds with epoll is a tight
 loop with no branches except the syscall. The batching in `shift_flush` groups
 contiguous operations together so you get these large runs for free.
+
+### Pattern E: SIMD-aligned components
+
+When processing components with SIMD intrinsics, the SoA column must be aligned
+to the SIMD register width. Set `alignment` at registration time and shift
+guarantees the column base pointer satisfies it — through growth, migration, and
+reallocation:
+
+```c
+/* 32-byte aligned for AVX */
+shift_component_info_t pos_info = {
+    .element_size = sizeof(float) * 8,  /* 8 floats = 32 bytes */
+    .alignment    = 32,
+};
+shift_component_id_t pos_id;
+shift_component_register(ctx, &pos_info, &pos_id);
+
+SHIFT_COLLECTION(ctx, particles_id, pos_id);
+shift_collection_reserve(ctx, particles_id, 4096);
+
+/* Column pointer is guaranteed 32-byte aligned */
+void  *base;
+size_t count;
+shift_collection_get_component_array(ctx, particles_id, pos_id, &base, &count);
+
+__m256 *positions = (__m256 *)base;  /* safe — properly aligned */
+for (size_t i = 0; i < count; i++)
+    positions[i] = _mm256_add_ps(positions[i], velocity_vec);
+```
+
+If your allocator already provides aligned allocation (e.g. `mimalloc_aligned_alloc`),
+set `aligned_alloc`, `aligned_realloc`, and `aligned_free` on the
+`shift_allocator_t` to avoid the overhead of shift's manual alignment fallback.
+
+### Pattern F: Building a query system on top of shift
+
+Shift is designed as a storage foundation. A consumer building an archetype-style
+query system needs two things from the storage layer: "which collections contain
+component X?" and "what components does collection Y have?" Both are available
+through the introspection APIs:
+
+```c
+/* Find all collections that have both position and velocity */
+const shift_collection_id_t *pos_cols, *vel_cols;
+size_t pos_count, vel_count;
+shift_component_get_collections(ctx, pos_id, &pos_cols, &pos_count);
+shift_component_get_collections(ctx, vel_id, &vel_cols, &vel_count);
+
+/* Intersect the two sorted lists to find matching collections */
+size_t pi = 0, vi = 0;
+while (pi < pos_count && vi < vel_count) {
+    if (pos_cols[pi] == vel_cols[vi]) {
+        shift_collection_id_t col = pos_cols[pi];
+
+        /* Iterate this collection's position and velocity arrays */
+        void  *pos_base, *vel_base;
+        size_t count;
+        shift_collection_get_component_array(ctx, col, pos_id, &pos_base, &count);
+        shift_collection_get_component_array(ctx, col, vel_id, &vel_base, NULL);
+
+        float (*pos)[3] = pos_base;
+        float (*vel)[3] = vel_base;
+        for (size_t i = 0; i < count; i++) {
+            pos[i][0] += vel[i][0] * dt;
+            pos[i][1] += vel[i][1] * dt;
+            pos[i][2] += vel[i][2] * dt;
+        }
+        pi++; vi++;
+    } else if (pos_cols[pi] < vel_cols[vi]) {
+        pi++;
+    } else {
+        vi++;
+    }
+}
+```
+
+The reverse index (`shift_component_get_collections`) and collection introspection
+(`shift_collection_get_components`) are maintained internally. A consumer never
+needs to iterate all collections and inspect them manually.
+
+### Pattern G: Capacity reservation for bulk loading
+
+When you know how many entities you'll create — loading a level, spawning a wave
+of particles, accepting a batch of connections — pre-allocate with
+`shift_collection_reserve` to avoid incremental reallocation during the load:
+
+```c
+SHIFT_COLLECTION(ctx, particles_id, pos_id, vel_id, life_id);
+
+/* Pre-allocate for 10000 particles — one allocation, no growth during spawn */
+shift_collection_reserve(ctx, particles_id, 10000);
+
+shift_entity_t *ep;
+shift_entity_create(ctx, 10000, particles_id, &ep);
+shift_flush(ctx);
+/* Constructor fires once with count=10000 on pre-allocated memory */
+```
+
+Without the reserve call, shift would grow the collection through 8 → 16 → 32 →
+... → 16384, performing a reallocation (and memcpy of all existing data) at each
+step. With the reserve, it's a single allocation up front.
+
+### Pattern H: Component metadata for consumer layers
+
+A consumer layer (ECS framework, editor, serialization system) often needs to
+attach metadata to components — type names, serialization functions, editor
+widgets, tag flags. The `user_data` pointer on `shift_component_info_t` provides
+a hook without requiring parallel arrays:
+
+```c
+typedef struct {
+    const char *type_name;
+    void (*serialize)(const void *data, FILE *out);
+    void (*deserialize)(void *data, FILE *in);
+    bool is_tag;  /* zero-size tag component */
+} component_meta_t;
+
+component_meta_t pos_meta = {
+    .type_name   = "Position",
+    .serialize   = serialize_vec3,
+    .deserialize = deserialize_vec3,
+};
+
+shift_component_info_t pos_info = {
+    .element_size = sizeof(float) * 3,
+    .user_data    = &pos_meta,
+};
+shift_component_id_t pos_id;
+shift_component_register(ctx, &pos_info, &pos_id);
+
+/* Later, in the serializer: */
+void *meta;
+shift_component_get_user_data(ctx, pos_id, &meta);
+component_meta_t *m = meta;
+m->serialize(data, file);
+```
+
+This avoids the pattern where every consumer layer maintains a
+`component_meta_t metas[MAX_COMPONENTS]` array indexed by component ID. The
+metadata lives right next to the component and follows it through the entire API.
 
 ## Design notes
 
