@@ -90,15 +90,17 @@ shift_collection_info_t col_info = {
     .comp_ids     = moving_comps,
     .comp_count   = 2,
     .max_capacity = 0,       /* 0 = dynamic growth */
-    .on_enter     = NULL,
-    .on_leave     = NULL,
 };
 shift_collection_id_t moving_id;
 shift_collection_register(ctx, &col_info, &moving_id);
 
+/* Register on_enter / on_leave handlers */
+shift_collection_on_enter(ctx, moving_id, my_on_enter, user_ctx, NULL);
+shift_collection_on_leave(ctx, moving_id, my_on_leave, user_ctx, NULL);
+
 /* Convenience macros */
 SHIFT_COLLECTION(ctx, moving_id, pos_id, vel_id);
-SHIFT_COLLECTION_EX(ctx, fixed_id, 64, on_enter_fn, on_leave_fn, pos_id);
+SHIFT_COLLECTION_CAP(ctx, fixed_id, 64, pos_id);   /* fixed capacity */
 SHIFT_COLLECTION_EMPTY(ctx, marker_id);   /* zero-component state marker */
 ```
 
@@ -315,6 +317,21 @@ shift_result_t shift_entity_destroy_immediate(shift_t *ctx, const shift_entity_t
 shift_result_t shift_entity_destroy_one_immediate(shift_t *ctx, shift_entity_t entity);
 ```
 
+### Entities (two-phase create)
+
+```c
+shift_result_t shift_entity_create_begin(shift_t *ctx, uint32_t count,
+                                         shift_collection_id_t dest,
+                                         shift_entity_t **out_entities);
+shift_result_t shift_entity_create_one_begin(shift_t *ctx,
+                                             shift_collection_id_t dest,
+                                             shift_entity_t *out_entity);
+
+shift_result_t shift_entity_create_end(shift_t *ctx, const shift_entity_t *entities,
+                                       uint32_t count);
+shift_result_t shift_entity_create_one_end(shift_t *ctx, shift_entity_t entity);
+```
+
 ### Entity queries and revocation
 
 ```c
@@ -471,6 +488,62 @@ shift_flush(ctx);
 Each state guarantees exactly the right components exist. Invalid access is
 impossible — asking for `stream_id` on a connecting entity returns
 `shift_error_not_found`.
+
+### Pattern C: Two-phase create with dynamic context
+
+Sometimes a component needs to be initialized with runtime state that only the
+creator knows — an external connection ID, a file descriptor from an accept
+call, a pointer into a foreign library's handle table. Constructors can't
+provide this because they only see zero-initialized memory.
+
+The two-phase `create_begin` / `create_end` pattern solves this:
+
+```c
+SHIFT_COMPONENT(ctx, sock_id, int);
+SHIFT_COMPONENT(ctx, conn_id, uint64_t);   /* external connection handle */
+SHIFT_COLLECTION(ctx, connections_id, sock_id, conn_id);
+
+/* Phase 1: begin — entity is allocated, constructors run, components
+ * are accessible, but the entity is NOT yet visible to collection
+ * iteration and on_enter has NOT fired. */
+shift_entity_t conn;
+shift_entity_create_one_begin(ctx, connections_id, &conn);
+
+/* Write dynamic state that only we know at creation time. */
+uint64_t *cid;
+shift_entity_get_component(ctx, conn, conn_id, (void **)&cid);
+*cid = external_library_accept();
+
+int *fd;
+shift_entity_get_component(ctx, conn, sock_id, (void **)&fd);
+*fd = accepted_socket_fd;
+
+/* Phase 2: end — entity becomes visible, on_enter fires.
+ * Any on_enter handler now sees fully initialized components. */
+shift_entity_create_one_end(ctx, conn);
+```
+
+Between `begin` and `end` the entity is in a **constructing** state:
+- `shift_entity_get_component` works — the creator can read and write components.
+- Collection iteration (`shift_collection_get_entities`, `shift_collection_get_component_array`) does **not** include the entity.
+- `shift_entity_move`, `shift_entity_destroy`, and `shift_entity_revoke` all reject it with `shift_error_stale`.
+- `on_enter` fires only at `create_end`, so other code reacting to the collection sees a fully formed entity, never a half-initialized one.
+
+Batch creates work the same way:
+
+```c
+shift_entity_t *ents;
+shift_entity_create_begin(ctx, 10, connections_id, &ents);
+
+for (int i = 0; i < 10; i++) {
+    uint64_t *cid;
+    shift_entity_get_component(ctx, ents[i], conn_id, (void **)&cid);
+    *cid = pending_connections[i].external_id;
+}
+
+shift_entity_create_end(ctx, ents, 10);
+/* single on_enter callback with count=10, all entities fully initialized */
+```
 
 ## Design notes
 

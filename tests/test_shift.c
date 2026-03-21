@@ -614,17 +614,17 @@ void test_max_collections_unaffected(void) {
 static int g_enter_count = 0;
 static int g_leave_count = 0;
 
-static void test_on_enter_cb(shift_t *ctx, const shift_entity_t *entities,
-                             uint32_t count) {
-  (void)ctx;
+static void test_on_enter_cb(const shift_entity_t *entities, uint32_t count,
+                             void *user_ctx) {
   (void)entities;
+  (void)user_ctx;
   g_enter_count += (int)count;
 }
 
-static void test_on_leave_cb(shift_t *ctx, const shift_entity_t *entities,
-                             uint32_t count) {
-  (void)ctx;
+static void test_on_leave_cb(const shift_entity_t *entities, uint32_t count,
+                             void *user_ctx) {
   (void)entities;
+  (void)user_ctx;
   g_leave_count += (int)count;
 }
 
@@ -638,15 +638,19 @@ void test_collection_on_enter_on_leave(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_component_register(ctx, &info, &comp_id));
 
-  shift_collection_info_t col_info = {
-      .comp_ids   = &comp_id,
-      .comp_count = 1,
-      .on_enter   = test_on_enter_cb,
-      .on_leave   = test_on_leave_cb,
-  };
   shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
-                        shift_collection_register(ctx, &col_info, &col_id));
+                        shift_collection_on_enter(ctx, col_id,
+                                                  test_on_enter_cb, NULL, NULL));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_leave(ctx, col_id,
+                                                  test_on_leave_cb, NULL, NULL));
 
   shift_entity_t e;
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_id, &e));
@@ -1415,9 +1419,9 @@ void test_entity_move_batch_partial_stale_no_side_effects(void) {
 
 static uint32_t g_on_leave_recorded_value;
 
-static void on_leave_reads_component(shift_t              *ctx,
-                                     const shift_entity_t *entities,
-                                     uint32_t              count) {
+static void on_leave_reads_component(const shift_entity_t *entities,
+                                     uint32_t count, void *user_ctx) {
+  shift_t *ctx = (shift_t *)user_ctx;
   TEST_ASSERT_EQUAL_UINT32(1, count);
   shift_component_id_t comp_id = 0; /* only one component registered */
   void                *ptr     = NULL;
@@ -1439,14 +1443,17 @@ void test_on_leave_can_access_source_component(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_component_register(ctx, &info, &comp_id));
 
-  shift_collection_info_t col_info = {
-      .comp_ids   = &comp_id,
-      .comp_count = 1,
-      .on_leave   = on_leave_reads_component,
-  };
   shift_collection_id_t col_src;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_src));
   TEST_ASSERT_EQUAL_INT(shift_ok,
-                        shift_collection_register(ctx, &col_info, &col_src));
+                        shift_collection_on_leave(ctx, col_src,
+                                                  on_leave_reads_component,
+                                                  ctx, NULL));
   shift_collection_id_t col_dst;
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
@@ -1641,14 +1648,16 @@ void test_immediate_create(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_component_register(ctx, &info, &comp_id));
 
-  shift_collection_info_t col_info = {
-      .comp_ids   = &comp_id,
-      .comp_count = 1,
-      .on_enter   = test_on_enter_cb,
-  };
   shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
-                        shift_collection_register(ctx, &col_info, &col_id));
+                        shift_collection_on_enter(ctx, col_id,
+                                                  test_on_enter_cb, NULL, NULL));
 
   shift_entity_t e;
   TEST_ASSERT_EQUAL_INT(shift_ok,
@@ -1689,14 +1698,16 @@ void test_immediate_create_batch(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_component_register(ctx, &info, &comp_id));
 
-  shift_collection_info_t col_info = {
-      .comp_ids   = &comp_id,
-      .comp_count = 1,
-      .on_enter   = test_on_enter_cb,
-  };
   shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
-                        shift_collection_register(ctx, &col_info, &col_id));
+                        shift_collection_on_enter(ctx, col_id,
+                                                  test_on_enter_cb, NULL, NULL));
 
   shift_entity_t *ep;
   TEST_ASSERT_EQUAL_INT(shift_ok,
@@ -1732,19 +1743,21 @@ void test_immediate_move(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids  = &comp_a,
-                                     .comp_count = 1,
-                                     .on_leave   = test_on_leave_cb},
+          &(shift_collection_info_t){.comp_ids = &comp_a, .comp_count = 1},
           &col_src));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_leave(ctx, col_src,
+                                                  test_on_leave_cb, NULL, NULL));
   shift_component_id_t dst_comps[] = {comp_a, comp_b};
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids  = dst_comps,
-                                     .comp_count = 2,
-                                     .on_enter   = test_on_enter_cb},
+          &(shift_collection_info_t){.comp_ids  = dst_comps, .comp_count = 2},
           &col_dst));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col_dst,
+                                                  test_on_enter_cb, NULL, NULL));
 
   /* Create entity in src (using deferred create + flush). */
   shift_entity_t e;
@@ -1800,14 +1813,16 @@ void test_immediate_destroy(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_component_register(ctx, &info, &comp_id));
 
-  shift_collection_info_t col_info = {
-      .comp_ids   = &comp_id,
-      .comp_count = 1,
-      .on_leave   = test_on_leave_cb,
-  };
   shift_collection_id_t col_id;
+  TEST_ASSERT_EQUAL_INT(
+      shift_ok,
+      shift_collection_register(
+          ctx,
+          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
-                        shift_collection_register(ctx, &col_info, &col_id));
+                        shift_collection_on_leave(ctx, col_id,
+                                                  test_on_leave_cb, NULL, NULL));
 
   shift_entity_t e;
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_id, &e));
@@ -2026,6 +2041,368 @@ void test_convenience_add_functions(void) {
 }
 
 /* --------------------------------------------------------------------------
+ * Handler API tests
+ * -------------------------------------------------------------------------- */
+
+static int g_handler_a_count = 0;
+static int g_handler_b_count = 0;
+static int g_handler_c_count = 0;
+
+static void handler_a(const shift_entity_t *e, uint32_t c, void *u) {
+  (void)e; (void)c; (void)u;
+  g_handler_a_count++;
+}
+static void handler_b(const shift_entity_t *e, uint32_t c, void *u) {
+  (void)e; (void)c; (void)u;
+  g_handler_b_count++;
+}
+static void handler_c(const shift_entity_t *e, uint32_t c, void *u) {
+  (void)e; (void)c; (void)u;
+  g_handler_c_count++;
+}
+
+void test_multiple_on_enter_handlers(void) {
+  shift_t *ctx = make_ctx();
+  g_handler_a_count = 0;
+  g_handler_b_count = 0;
+
+  SHIFT_COMPONENT(ctx, comp, uint32_t);
+  SHIFT_COLLECTION(ctx, col, comp);
+
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, handler_a, NULL, NULL));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, handler_b, NULL, NULL));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_INT(1, g_handler_a_count);
+  TEST_ASSERT_EQUAL_INT(1, g_handler_b_count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_handler_remove(void) {
+  shift_t *ctx = make_ctx();
+  g_handler_a_count = 0;
+  g_handler_b_count = 0;
+
+  SHIFT_COMPONENT(ctx, comp, uint32_t);
+  SHIFT_COLLECTION(ctx, col, comp);
+
+  shift_handler_id_t id_a, id_b;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, handler_a, NULL, &id_a));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, handler_b, NULL, &id_b));
+
+  /* Remove handler A. */
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_remove_handler(ctx, col, id_a));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_INT(0, g_handler_a_count); /* removed — not called */
+  TEST_ASSERT_EQUAL_INT(1, g_handler_b_count); /* still active */
+
+  shift_context_destroy(ctx);
+}
+
+static int g_fire_order[4];
+static int g_fire_order_idx = 0;
+
+static void order_a(const shift_entity_t *e, uint32_t c, void *u) {
+  (void)e; (void)c; (void)u;
+  g_fire_order[g_fire_order_idx++] = 1;
+}
+static void order_b(const shift_entity_t *e, uint32_t c, void *u) {
+  (void)e; (void)c; (void)u;
+  g_fire_order[g_fire_order_idx++] = 2;
+}
+static void order_c(const shift_entity_t *e, uint32_t c, void *u) {
+  (void)e; (void)c; (void)u;
+  g_fire_order[g_fire_order_idx++] = 3;
+}
+
+void test_handler_remove_preserves_order(void) {
+  shift_t *ctx = make_ctx();
+  g_fire_order_idx = 0;
+
+  SHIFT_COMPONENT(ctx, comp, uint32_t);
+  SHIFT_COLLECTION(ctx, col, comp);
+
+  shift_handler_id_t id_a, id_b, id_c;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, order_a, NULL, &id_a));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, order_b, NULL, &id_b));
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, order_c, NULL, &id_c));
+
+  /* Remove the middle handler. */
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_remove_handler(ctx, col, id_b));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  /* A and C fire in original registration order. */
+  TEST_ASSERT_EQUAL_INT(2, g_fire_order_idx);
+  TEST_ASSERT_EQUAL_INT(1, g_fire_order[0]); /* A */
+  TEST_ASSERT_EQUAL_INT(3, g_fire_order[1]); /* C */
+
+  shift_context_destroy(ctx);
+}
+
+void test_handler_remove_not_found(void) {
+  shift_t *ctx = make_ctx();
+
+  SHIFT_COMPONENT(ctx, comp, uint32_t);
+  SHIFT_COLLECTION(ctx, col, comp);
+
+  TEST_ASSERT_EQUAL_INT(shift_error_not_found,
+                        shift_collection_remove_handler(ctx, col, 9999));
+
+  shift_context_destroy(ctx);
+}
+
+static void user_ctx_cb(const shift_entity_t *entities, uint32_t count,
+                        void *user_ctx) {
+  (void)entities;
+  *(int *)user_ctx += (int)count;
+}
+
+void test_handler_user_ctx(void) {
+  shift_t *ctx = make_ctx();
+
+  SHIFT_COMPONENT(ctx, comp, uint32_t);
+  SHIFT_COLLECTION(ctx, col, comp);
+
+  int counter = 0;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_on_enter(ctx, col, user_ctx_cb,
+                                                  &counter, NULL));
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col, &e));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_flush(ctx));
+
+  TEST_ASSERT_EQUAL_INT(1, counter);
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * Two-phase create (begin / end)
+ * -------------------------------------------------------------------------- */
+
+void test_create_begin_end_basic(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, pos, float);
+  SHIFT_COLLECTION(ctx, col, pos);
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_one_begin(ctx, col, &e));
+
+  /* Component is accessible between begin and end. */
+  float *p;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, pos, (void **)&p));
+  *p = 42.0f;
+
+  /* Entity not visible via collection iteration yet. */
+  size_t count;
+  shift_entity_t *ents;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, col, &ents, &count));
+  TEST_ASSERT_EQUAL_UINT32(0, count);
+
+  /* Commit. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one_end(ctx, e));
+
+  /* Now visible. */
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_collection_get_entities(ctx, col, &ents, &count));
+  TEST_ASSERT_EQUAL_UINT32(1, count);
+
+  /* Component value preserved. */
+  float *p2;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, pos, (void **)&p2));
+  TEST_ASSERT_EQUAL_FLOAT(42.0f, *p2);
+
+  shift_context_destroy(ctx);
+}
+
+static int g_begin_end_enter_count;
+static void begin_end_on_enter_cb(const shift_entity_t *entities, uint32_t cnt,
+                                  void *user_ctx) {
+  (void)entities;
+  (void)user_ctx;
+  g_begin_end_enter_count += (int)cnt;
+}
+
+void test_create_begin_end_on_enter_fires_at_end(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, pos, float);
+  SHIFT_COLLECTION(ctx, col, pos);
+
+  g_begin_end_enter_count = 0;
+  shift_collection_on_enter(ctx, col, begin_end_on_enter_cb, NULL, NULL);
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_one_begin(ctx, col, &e));
+
+  /* on_enter has NOT fired yet. */
+  TEST_ASSERT_EQUAL_INT(0, g_begin_end_enter_count);
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one_end(ctx, e));
+
+  /* on_enter fires at end. */
+  TEST_ASSERT_EQUAL_INT(1, g_begin_end_enter_count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_create_begin_end_batch(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, val, int);
+  SHIFT_COLLECTION(ctx, col, val);
+
+  shift_entity_t *ents;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_begin(ctx, 3, col, &ents));
+
+  /* Write to each entity's component. */
+  for (int i = 0; i < 3; i++) {
+    int *v;
+    TEST_ASSERT_EQUAL_INT(shift_ok,
+        shift_entity_get_component(ctx, ents[i], val, (void **)&v));
+    *v = 100 + i;
+  }
+
+  /* Not visible yet. */
+  size_t count;
+  shift_entity_t *col_ents;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+      shift_collection_get_entities(ctx, col, &col_ents, &count));
+  TEST_ASSERT_EQUAL_UINT32(0, count);
+
+  /* End the batch. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_end(ctx, ents, 3));
+
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+      shift_collection_get_entities(ctx, col, &col_ents, &count));
+  TEST_ASSERT_EQUAL_UINT32(3, count);
+
+  /* Values preserved. */
+  for (int i = 0; i < 3; i++) {
+    int *v;
+    TEST_ASSERT_EQUAL_INT(shift_ok,
+        shift_entity_get_component(ctx, ents[i], val, (void **)&v));
+    TEST_ASSERT_EQUAL_INT(100 + i, *v);
+  }
+
+  shift_context_destroy(ctx);
+}
+
+void test_create_begin_rejects_move(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, val, int);
+  SHIFT_COLLECTION(ctx, col_a, val);
+  SHIFT_COLLECTION(ctx, col_b, val);
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_one_begin(ctx, col_a, &e));
+
+  /* Cannot move a constructing entity. */
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_move_one(ctx, e, col_b));
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_move_one_immediate(ctx, e, col_b));
+
+  /* Cannot destroy a constructing entity. */
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_destroy_one(ctx, e));
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_destroy_one_immediate(ctx, e));
+
+  /* Cannot revoke a constructing entity. */
+  shift_entity_t new_e;
+  TEST_ASSERT_EQUAL_INT(shift_error_stale,
+                        shift_entity_revoke(ctx, e, &new_e));
+
+  /* Can still end it normally. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one_end(ctx, e));
+
+  shift_context_destroy(ctx);
+}
+
+static int g_begin_ctor_count;
+static void begin_ctor(void *data, uint32_t count) {
+  int *vals = (int *)data;
+  for (uint32_t i = 0; i < count; i++)
+    vals[i] = 999;
+  g_begin_ctor_count += (int)count;
+}
+
+void test_create_begin_constructor_runs(void) {
+  shift_t *ctx = make_ctx();
+
+  g_begin_ctor_count = 0;
+
+  SHIFT_COMPONENT_EX(ctx, val, int, begin_ctor, NULL);
+  SHIFT_COLLECTION(ctx, col, val);
+
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_one_begin(ctx, col, &e));
+
+  /* Constructor ran during begin. */
+  TEST_ASSERT_EQUAL_INT(1, g_begin_ctor_count);
+
+  int *v;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, val, (void **)&v));
+  TEST_ASSERT_EQUAL_INT(999, *v);
+
+  /* Overwrite with dynamic state. */
+  *v = 42;
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one_end(ctx, e));
+
+  /* Value is our overwritten one, not the constructor default. */
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_get_component(ctx, e, val, (void **)&v));
+  TEST_ASSERT_EQUAL_INT(42, *v);
+
+  shift_context_destroy(ctx);
+}
+
+void test_create_begin_end_invalid(void) {
+  shift_t *ctx = make_ctx();
+  SHIFT_COMPONENT(ctx, val, int);
+  SHIFT_COLLECTION(ctx, col, val);
+
+  /* End with a non-constructing entity. */
+  shift_entity_t e;
+  TEST_ASSERT_EQUAL_INT(shift_ok,
+                        shift_entity_create_one_immediate(ctx, col, &e));
+  TEST_ASSERT_EQUAL_INT(shift_error_invalid,
+                        shift_entity_create_one_end(ctx, e));
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
  * Runner
  * -------------------------------------------------------------------------- */
 
@@ -2082,5 +2459,16 @@ int main(void) {
   RUN_TEST(test_revoke_stale_entity);
   RUN_TEST(test_revoke_pending_move_entity);
   RUN_TEST(test_convenience_add_functions);
+  RUN_TEST(test_multiple_on_enter_handlers);
+  RUN_TEST(test_handler_remove);
+  RUN_TEST(test_handler_remove_preserves_order);
+  RUN_TEST(test_handler_remove_not_found);
+  RUN_TEST(test_handler_user_ctx);
+  RUN_TEST(test_create_begin_end_basic);
+  RUN_TEST(test_create_begin_end_on_enter_fires_at_end);
+  RUN_TEST(test_create_begin_end_batch);
+  RUN_TEST(test_create_begin_rejects_move);
+  RUN_TEST(test_create_begin_constructor_runs);
+  RUN_TEST(test_create_begin_end_invalid);
   return UNITY_END();
 }

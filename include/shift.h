@@ -29,6 +29,10 @@ typedef struct {
 
 typedef uint32_t shift_component_id_t;
 typedef uint32_t shift_collection_id_t;
+typedef uint32_t shift_handler_id_t;
+
+typedef void (*shift_collection_callback_t)(const shift_entity_t *entities,
+                                            uint32_t count, void *user_ctx);
 
 /* --------------------------------------------------------------------------
  * Allocator
@@ -80,6 +84,7 @@ typedef struct {
   shift_collection_id_t col_id;
   uint32_t              offset;
   bool                  has_pending_move;
+  bool                  constructing; /* between create_begin and create_end */
 } shift_metadata_t;
 
 /* --------------------------------------------------------------------------
@@ -105,6 +110,7 @@ typedef struct shift_s {
   shift_migration_recipe_t *migration_recipes;
   size_t                    migration_recipe_count;
   size_t                    migration_recipe_capacity;
+  uint32_t                  next_handler_id;
 } shift_t;
 
 /* --------------------------------------------------------------------------
@@ -131,10 +137,6 @@ typedef struct {
   const shift_component_id_t *comp_ids;
   size_t                      comp_count;
   size_t                      max_capacity; /* leave 0 for dynamic */
-  void (*on_enter)(shift_t *ctx, const shift_entity_t *entities,
-                   uint32_t count); /* called after entities are placed */
-  void (*on_leave)(shift_t *ctx, const shift_entity_t *entities,
-                   uint32_t count); /* called before entities are removed */
 } shift_collection_info_t;
 
 shift_result_t shift_collection_register(shift_t                       *ctx,
@@ -150,6 +152,28 @@ shift_result_t shift_collection_get_entities(shift_t              *ctx,
                                              shift_collection_id_t col_id,
                                              shift_entity_t      **out_entities,
                                              size_t               *out_count);
+
+/* --------------------------------------------------------------------------
+ * Collection callbacks — add/remove on_enter and on_leave handlers.
+ * Multiple handlers per event per collection; fired in registration order.
+ * out_id may be NULL if the caller does not need the handle.
+ * -------------------------------------------------------------------------- */
+
+shift_result_t shift_collection_on_enter(shift_t                     *ctx,
+                                         shift_collection_id_t        col_id,
+                                         shift_collection_callback_t  fn,
+                                         void                        *user_ctx,
+                                         shift_handler_id_t          *out_id);
+
+shift_result_t shift_collection_on_leave(shift_t                     *ctx,
+                                         shift_collection_id_t        col_id,
+                                         shift_collection_callback_t  fn,
+                                         void                        *user_ctx,
+                                         shift_handler_id_t          *out_id);
+
+shift_result_t shift_collection_remove_handler(shift_t              *ctx,
+                                               shift_collection_id_t col_id,
+                                               shift_handler_id_t    handler_id);
 
 /* --------------------------------------------------------------------------
  * Entity operations
@@ -212,6 +236,28 @@ shift_result_t shift_entity_destroy_one_immediate(shift_t        *ctx,
                                                    shift_entity_t  entity);
 
 /* --------------------------------------------------------------------------
+ * Two-phase create — allocates the entity in the destination collection,
+ * zero-inits and runs constructors, but does NOT fire on_enter until
+ * create_end is called. Between begin and end the caller may write
+ * dynamic state into components via shift_entity_get_component.
+ * Entities in the begun state are excluded from collection iteration.
+ * -------------------------------------------------------------------------- */
+
+shift_result_t shift_entity_create_begin(shift_t              *ctx,
+                                         uint32_t              count,
+                                         shift_collection_id_t dest_col_id,
+                                         shift_entity_t      **out_entities);
+shift_result_t shift_entity_create_one_begin(shift_t              *ctx,
+                                             shift_collection_id_t dest_col_id,
+                                             shift_entity_t       *out_entity);
+
+shift_result_t shift_entity_create_end(shift_t              *ctx,
+                                       const shift_entity_t *entities,
+                                       uint32_t              count);
+shift_result_t shift_entity_create_one_end(shift_t        *ctx,
+                                           shift_entity_t  entity);
+
+/* --------------------------------------------------------------------------
  * Generation revocation — invalidates all existing handles without destroying
  * the entity. Returns the new valid handle via out_new.
  * -------------------------------------------------------------------------- */
@@ -253,6 +299,8 @@ shift_entity_get_collection(const shift_t *ctx, shift_entity_t entity,
                             shift_collection_id_t *id) {
   if (entity.index >= ctx->max_entities)
     return shift_error_invalid;
+  if (shift_entity_is_stale(ctx, entity))
+    return shift_error_stale;
   *id = ctx->metadata[entity.index].col_id;
 
   return shift_ok;
@@ -355,19 +403,17 @@ shift_collection_add_empty(shift_t *ctx, shift_result_t *err) {
         &(name));                                                             \
   } while (0)
 
-/* Like SHIFT_COLLECTION but with max_capacity, on_enter, on_leave. */
-#define SHIFT_COLLECTION_EX(ctx, name, cap, enter, leave, ...)                \
+/* Like SHIFT_COLLECTION but with a fixed max_capacity. */
+#define SHIFT_COLLECTION_CAP(ctx, name, cap, ...)                             \
   shift_collection_id_t name;                                                 \
   do {                                                                        \
     shift_component_id_t _comps[] = {__VA_ARGS__};                            \
     shift_collection_register(                                                \
         (ctx),                                                                \
         &(shift_collection_info_t){                                           \
-            .comp_ids      = _comps,                                          \
-            .comp_count    = sizeof(_comps) / sizeof(_comps[0]),              \
-            .max_capacity  = (cap),                                           \
-            .on_enter      = (enter),                                         \
-            .on_leave      = (leave)},                                        \
+            .comp_ids     = _comps,                                           \
+            .comp_count   = sizeof(_comps) / sizeof(_comps[0]),               \
+            .max_capacity = (cap)},                                           \
         &(name));                                                             \
   } while (0)
 
