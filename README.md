@@ -157,6 +157,45 @@ for (size_t i = 0; i < count; i++) {
 }
 ```
 
+### Component pointer lifetime
+
+**Raw pointers obtained from `shift_entity_get_component` or
+`shift_collection_get_component_array` are only valid until the next
+`shift_flush()` or `_immediate` operation that moves or destroys the entity.**
+
+Because collections use swap-remove to stay dense, any move or destroy can
+relocate component data in memory. A pointer you grabbed before the flush may
+now point to a different entity's data — or to freed memory. There is no
+warning at runtime; the pointer just silently goes stale.
+
+The safe rule: **treat component pointers like borrowed references scoped to a
+single system function.** Fetch the pointer, read/write it, and let it go
+before the next flush. Do not stash component pointers in long-lived
+structures, hash maps, or across system boundaries.
+
+```c
+/* SAFE — pointer used and discarded within one system */
+void physics_system(shift_t *ctx) {
+    float *pos = NULL;
+    shift_entity_get_component(ctx, e, pos_id, (void **)&pos);
+    pos[0] += vel_x * dt;
+    /* pos is not stored anywhere — next flush can freely move data */
+}
+
+/* DANGEROUS — pointer held across a flush */
+float *pos = NULL;
+shift_entity_get_component(ctx, e, pos_id, (void **)&pos);
+shift_flush(ctx);   /* entity may have moved — pos is now stale! */
+pos[0] = 0.0f;     /* undefined behaviour */
+```
+
+In advanced scenarios where you can guarantee no flushes or immediate
+operations will occur (e.g. iterating multiple read-only systems between
+flushes), holding pointers across those systems is safe as a performance
+optimization. But this is fragile — any future code that adds a flush or
+immediate op between those systems silently breaks the invariant. Default to
+re-fetching.
+
 ### 6. Move and destroy entities
 
 ```c
