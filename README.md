@@ -137,6 +137,41 @@ void my_cb(shift_t *ctx, shift_collection_id_t col_id,
 - For moves: on_leave fires on the source, then on_enter fires on the destination.
 - For creates: on_enter only. For destroys: on_leave only.
 
+**What you can and cannot call inside callbacks** (applies to `on_enter`, `on_leave`, constructors, and destructors equally):
+
+Callbacks fire in two contexts: during `shift_flush()` (deferred path) and inline during `_immediate` operations. The rules differ:
+
+*Always safe (any callback context):*
+
+| Function | Notes |
+|---|---|
+| `shift_entity_get_component` | Works on the affected entities and any unrelated entity |
+| `shift_collection_get_component_array` | Arrays are stable within the callback |
+| `shift_collection_get_entities` | Same |
+| `shift_entity_is_stale` / `is_moving` / `get_collection` | Read-only metadata checks |
+| All introspection (`shift_collection_count`, `get_components`, `entity_count`, `shift_component_get_collections`, `get_user_data`) | Read-only |
+
+*Safe only in `_immediate` callbacks (NOT during `shift_flush`):*
+
+| Function | Notes |
+|---|---|
+| `shift_entity_create` | Enqueues for the next flush — the deferred queue is idle |
+| `shift_entity_move` | Same |
+| `shift_entity_destroy` | Same |
+
+During `shift_flush`, the deferred queue is being consumed. Pushing new ops onto it corrupts the iteration.
+
+*Never safe during `shift_flush`, risky during `_immediate` callbacks:*
+
+| Function | Why |
+|---|---|
+| `shift_entity_create_immediate` | Can realloc columns the flush is iterating. Manipulates the null pool which flush is also using. In `_immediate` callbacks, safe only if targeting a collection not involved in the current operation. |
+| `shift_entity_move_immediate` | `col_remove_run` on the source can swap-remove entities the flush hasn't processed yet. Triggers nested callbacks. In `_immediate` callbacks, safe only if targeting uninvolved collections. |
+| `shift_entity_destroy_immediate` | Same as move_immediate (destroy is a move to the null collection) |
+| `shift_collection_reserve` | Can realloc columns the flush or immediate op is actively reading/writing |
+
+**The core rule: during a flush, the only safe thing to do in a callback is read. During an `_immediate` callback, you can also enqueue deferred work for the next flush.**
+
 The `offset` and `count` parameters let you index directly into the collection's SoA arrays — the same offset works for the entity array and every component column. See [Pattern D](#pattern-d-fast-batch-processing-in-callbacks) below.
 
 ### 4. Create entities
@@ -184,37 +219,111 @@ for (size_t i = 0; i < count; i++) {
 }
 ```
 
-### Component pointer lifetime
+### Pointer lifetime and why entity handles are your stable reference
 
-**Raw pointers obtained from `shift_entity_get_component` or
-`shift_collection_get_component_array` are only valid until the next
-`shift_flush()` or `_immediate` operation that moves or destroys the entity.**
+**Never cache raw pointers from `shift_entity_get_component`,
+`shift_collection_get_component_array`, or `shift_collection_get_entities`.
+Store `shift_entity_t` handles instead and re-fetch pointers when you need
+them.**
 
-Because collections use swap-remove to stay dense, any move or destroy can
-relocate component data in memory. A pointer you grabbed before the flush may
-now point to a different entity's data — or to freed memory. There is no
-warning at runtime; the pointer just silently goes stale.
+To understand why, you need to know what shift does to memory under the hood.
 
-The safe rule: **treat component pointers like borrowed references scoped to a
-single system function.** Fetch the pointer, read/write it, and let it go
-before the next flush. Do not stash component pointers in long-lived
-structures, hash maps, or across system boundaries.
+**Swap-remove keeps arrays dense.** When entity B is destroyed or moved out of
+a collection that contains [A, B, C, D], shift copies D's data into B's slot
+and decrements the count. The result is [A, D, C] — no gap, no tombstone, and
+D's metadata is updated to reflect its new offset. But any pointer you held to
+B's slot now points at D's data. Any pointer you held to D's slot now points
+past the end of the live range.
+
+```
+Before:   [A] [B] [C] [D]    count=4
+                ↑ destroy B
+After:    [A] [D] [C]        count=3
+                ↑ D was copied here — old pointer to B now reads D's data
+```
+
+**Moves copy data to a new collection.** When an entity moves from collection
+X to collection Y, its component data is copied into Y's arrays and removed
+from X via swap-remove. A pointer into X that used to reference this entity
+now points at whatever the swap-remove put there.
+
+**Growth reallocates the entire column.** When a collection grows (because an
+entity was created or moved into it), `realloc` may move the SoA column to a
+new address. Every pointer into that column — even for entities that didn't
+move — becomes dangling.
+
+All three of these can happen during `shift_flush()`, any `_immediate`
+operation, or `shift_collection_reserve()`. None of them produce a runtime
+warning. The pointer just silently refers to the wrong data, a different
+entity's data, or freed memory.
+
+**Entity handles survive all of this.** A `shift_entity_t` is an
+`{index, generation}` pair. The index identifies a metadata slot that always
+tracks the entity's current collection and offset, regardless of how many
+times it has been swap-removed, migrated, or reallocated around. As long as
+the generation matches, the handle is valid and `shift_entity_get_component`
+will find the entity's data at its current location.
+
+When an entity is destroyed, its generation is bumped. Any handle with the old
+generation will fail `shift_entity_is_stale()` and `shift_entity_get_component`
+returns `shift_error_stale`. This is how you detect that something you were
+referencing no longer exists — without ever touching a dangling pointer.
+
+**The pattern:**
 
 ```c
-/* SAFE — pointer used and discarded within one system */
-void physics_system(shift_t *ctx) {
-    float *pos = NULL;
-    shift_entity_get_component(ctx, e, pos_id, (void **)&pos);
-    pos[0] += vel_x * dt;
-    /* pos is not stored anywhere — next flush can freely move data */
-}
+/* WRONG — caching a component pointer */
+typedef struct {
+    float *cached_pos;  /* BAD: will dangle after next flush */
+} my_system_t;
 
-/* DANGEROUS — pointer held across a flush */
-float *pos = NULL;
-shift_entity_get_component(ctx, e, pos_id, (void **)&pos);
-shift_flush(ctx);   /* entity may have moved — pos is now stale! */
-pos[0] = 0.0f;     /* undefined behaviour */
+/* WRONG — caching a collection offset */
+typedef struct {
+    size_t offset;  /* BAD: swap-remove can change any entity's offset */
+} my_ref_t;
+
+/* RIGHT — storing entity handles, re-fetching when needed */
+typedef struct {
+    shift_entity_t target;  /* stable across flushes */
+} my_ref_t;
+
+void use_ref(shift_t *ctx, my_ref_t *ref) {
+    if (shift_entity_is_stale(ctx, ref->target)) {
+        /* entity was destroyed or revoked — handle it */
+        return;
+    }
+    float *pos = NULL;
+    shift_entity_get_component(ctx, ref->target, pos_id, (void **)&pos);
+    pos[0] += 1.0f;
+    /* don't store pos — let it go, re-fetch next time */
+}
 ```
+
+For **bulk iteration** (where you're processing every entity in a collection
+rather than chasing individual handles), grab the column base pointer and
+count, iterate, and discard:
+
+```c
+void physics_system(shift_t *ctx) {
+    void  *pos_base, *vel_base;
+    size_t count;
+    shift_collection_get_component_array(ctx, moving_id, pos_id,
+                                         &pos_base, &count);
+    shift_collection_get_component_array(ctx, moving_id, vel_id,
+                                         &vel_base, NULL);
+    float (*pos)[3] = pos_base;
+    float (*vel)[3] = vel_base;
+    for (size_t i = 0; i < count; i++) {
+        pos[i][0] += vel[i][0] * dt;
+        pos[i][1] += vel[i][1] * dt;
+        pos[i][2] += vel[i][2] * dt;
+    }
+    /* pos_base, vel_base are not stored — safe to flush after this */
+}
+```
+
+This is safe because no mutations happen during the loop. The pointers are
+scoped to this function and discarded before the next `shift_flush()`.
 
 In advanced scenarios where you can guarantee no flushes or immediate
 operations will occur (e.g. iterating multiple read-only systems between

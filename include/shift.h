@@ -47,6 +47,29 @@ typedef struct shift_s shift_t;
  *   shift_collection_get_component_array(ctx, col_id, comp, &base, NULL);
  *   MyType *p = (MyType *)base + offset;
  *   // p[0..count-1] are the affected elements
+ *
+ * **Callback safety rules** (same rules apply to component ctor/dtor):
+ *
+ * Always safe (any callback context):
+ *   - shift_entity_get_component (on affected or unrelated entities)
+ *   - shift_collection_get_component_array, shift_collection_get_entities
+ *   - shift_entity_is_stale, shift_entity_is_moving,
+ *     shift_entity_get_collection
+ *   - All introspection (shift_collection_count,
+ *     shift_collection_get_components, shift_component_get_collections,
+ *     shift_component_get_user_data, shift_collection_entity_count)
+ *
+ * Safe only in _immediate callbacks (NOT during shift_flush):
+ *   - shift_entity_create, shift_entity_move, shift_entity_destroy
+ *     (deferred variants — they enqueue for the next flush)
+ *
+ * Never safe during shift_flush, risky in _immediate callbacks:
+ *   - All _immediate operations (create/move/destroy_immediate)
+ *   - shift_collection_reserve
+ *   These can reallocate columns, corrupt flush iteration state, or
+ *   trigger nested callbacks. In _immediate callbacks they are safe
+ *   only if they target collections not involved in the current
+ *   operation.
  */
 typedef void (*shift_collection_callback_t)(shift_t               *ctx,
                                             shift_collection_id_t  col_id,
@@ -67,6 +90,8 @@ typedef void (*shift_collection_callback_t)(shift_t               *ctx,
  * @param count      Number of contiguous slots to initialize.
  *
  * Typical usage: MyType *p = (MyType *)data + offset;
+ *
+ * See shift_collection_callback_t for callback safety rules.
  */
 typedef void (*shift_component_ctor_t)(shift_t               *ctx,
                                        shift_collection_id_t  col_id,
@@ -87,6 +112,8 @@ typedef void (*shift_component_ctor_t)(shift_t               *ctx,
  * @param count      Number of contiguous slots to tear down.
  *
  * Typical usage: MyType *p = (MyType *)data + offset;
+ *
+ * See shift_collection_callback_t for callback safety rules.
  */
 typedef void (*shift_component_dtor_t)(shift_t               *ctx,
                                        shift_collection_id_t  col_id,
@@ -278,6 +305,12 @@ shift_result_t shift_collection_register(shift_t                       *ctx,
  * @param out_count  Receives the number of live entities (may be NULL).
  * @return shift_ok, shift_error_null, or shift_error_not_found if the
  *         collection does not contain comp_id.
+ *
+ * @warning The returned pointer and count are a snapshot. Any subsequent
+ * shift_flush(), _immediate operation, or shift_collection_reserve() on this
+ * collection can reallocate the column (invalidating the pointer) and change
+ * the entity count and ordering via swap-remove. Re-fetch after any mutation.
+ * See shift_entity_get_component for the full explanation.
  */
 shift_result_t
 shift_collection_get_component_array(shift_t *ctx, shift_collection_id_t col_id,
@@ -292,6 +325,9 @@ shift_collection_get_component_array(shift_t *ctx, shift_collection_id_t col_id,
  * @param out_entities  Receives the base pointer to the entity array.
  * @param out_count     Receives the number of live entities (may be NULL).
  * @return shift_ok, shift_error_null, or shift_error_not_found.
+ *
+ * @warning Same lifetime rules as shift_collection_get_component_array.
+ * The pointer and count are invalidated by any mutation on this collection.
  */
 shift_result_t shift_collection_get_entities(shift_t              *ctx,
                                              shift_collection_id_t col_id,
@@ -436,12 +472,23 @@ shift_result_t shift_entity_move_one(shift_t *ctx, shift_entity_t entity,
  * @param ctx       The shift context.
  * @param entity    Entity handle.
  * @param comp_id   Component to look up.
- * @param out_data  Receives a pointer to the entity's component data. Valid
- *                  until the next shift_flush() or _immediate operation that
- *                  touches this entity.
+ * @param out_data  Receives a pointer to the entity's component data.
  * @return shift_ok, shift_error_null, shift_error_stale (handle expired or
  *         entity has a pending move), or shift_error_not_found (component not
  *         in entity's collection).
+ *
+ * @warning The returned pointer is a borrowed reference, valid only until the
+ * next shift_flush(), _immediate operation, or shift_collection_reserve() that
+ * touches the entity's collection. Any of these can trigger swap-remove
+ * (which overwrites the slot with tail data), reallocation (which moves the
+ * entire column to new memory), or migration (which moves the entity to a
+ * different collection entirely). After any such operation the pointer may
+ * reference a different entity's data, freed memory, or reallocated memory.
+ *
+ * Never cache the returned pointer. Store the shift_entity_t handle instead
+ * and call this function again when you need the data. The handle remains
+ * valid across flushes (check with shift_entity_is_stale if unsure); the
+ * pointer does not.
  */
 shift_result_t shift_entity_get_component(shift_t *ctx, shift_entity_t entity,
                                           shift_component_id_t comp_id,
