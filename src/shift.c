@@ -603,6 +603,17 @@ shift_result_t shift_component_get_user_data(const shift_t        *ctx,
   return shift_ok;
 }
 
+shift_result_t shift_component_set_user_data(shift_t              *ctx,
+                                             shift_component_id_t  comp_id,
+                                             void                 *user_data) {
+  if (!ctx)
+    return shift_error_null;
+  if (comp_id >= ctx->component_count)
+    return shift_error_not_found;
+  ctx->components[comp_id].user_data = user_data;
+  return shift_ok;
+}
+
 shift_result_t shift_component_get_collections(
     const shift_t *ctx, shift_component_id_t comp_id,
     const shift_collection_id_t **out_ids, size_t *out_count) {

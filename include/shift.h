@@ -263,6 +263,18 @@ shift_result_t shift_component_get_user_data(const shift_t        *ctx,
                                              void                **out_data);
 
 /**
+ * Set the user_data pointer for a registered component.
+ *
+ * @param ctx        The shift context.
+ * @param comp_id    Component ID.
+ * @param user_data  The new user_data pointer to store.
+ * @return shift_ok, shift_error_null, or shift_error_not_found.
+ */
+shift_result_t shift_component_set_user_data(shift_t              *ctx,
+                                             shift_component_id_t  comp_id,
+                                             void                 *user_data);
+
+/**
  * Get the list of collections that contain a given component.
  *
  * @param ctx        The shift context.
