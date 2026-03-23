@@ -400,8 +400,10 @@ static int  g_ctor_count      = 0;
 static int  g_ctor_call_count = 0;
 static void counting_ctor(shift_t *ctx, shift_collection_id_t col_id,
                            const shift_entity_t *entities, void *data,
-                           uint32_t offset, uint32_t count) {
+                           uint32_t offset, uint32_t count,
+                           void *user_data) {
   (void)ctx; (void)col_id; (void)entities; (void)data; (void)offset;
+  (void)user_data;
   g_ctor_count += (int)count;
   g_ctor_call_count++;
 }
@@ -410,8 +412,10 @@ static int  g_dtor_count      = 0;
 static int  g_dtor_call_count = 0;
 static void counting_dtor(shift_t *ctx, shift_collection_id_t col_id,
                            const shift_entity_t *entities, void *data,
-                           uint32_t offset, uint32_t count) {
+                           uint32_t offset, uint32_t count,
+                           void *user_data) {
   (void)ctx; (void)col_id; (void)entities; (void)data; (void)offset;
+  (void)user_data;
   g_dtor_count += (int)count;
   g_dtor_call_count++;
 }
@@ -2370,8 +2374,9 @@ void test_create_begin_rejects_move(void) {
 static int g_begin_ctor_count;
 static void begin_ctor(shift_t *ctx, shift_collection_id_t col_id,
                        const shift_entity_t *entities, void *data,
-                       uint32_t offset, uint32_t count) {
-  (void)ctx; (void)col_id; (void)entities;
+                       uint32_t offset, uint32_t count,
+                       void *user_data) {
+  (void)ctx; (void)col_id; (void)entities; (void)user_data;
   int *vals = (int *)data + offset;
   for (uint32_t i = 0; i < count; i++)
     vals[i] = 999;

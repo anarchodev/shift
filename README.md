@@ -9,7 +9,7 @@ A C23 library that provides an entity system and collections with deferred mutat
 **Core concepts:**
 
 - **Entities** — `{index, generation}` handles. The generation increments on destruction, making stale handles detectable.
-- **Components** — typed data blobs registered with `shift_component_register`. Each component has an `element_size`, optional `alignment` for SIMD-friendly column allocation, optional `constructor`/`destructor` callbacks, and an opaque `user_data` pointer for consumer layers. All callbacks receive the context, collection ID, entity array, data pointer, offset, and count — so they can rip through SoA arrays with pointer arithmetic.
+- **Components** — typed data blobs registered with `shift_component_register`. Each component has an `element_size`, optional `alignment` for SIMD-friendly column allocation, optional `constructor`/`destructor` callbacks, and an opaque `user_data` pointer for consumer layers. Constructor/destructor callbacks receive the context, collection ID, entity array, data pointer, offset, count, and the component's `user_data` pointer — so they can rip through SoA arrays with pointer arithmetic and access component metadata without an extra lookup.
 - **Collections** — named groups that store a fixed set of components in Structure-of-Arrays layout. Entities live in exactly one collection at a time. Collections support `on_enter`/`on_leave` callbacks and optional fixed capacity.
 - **Deferred mutations** — `shift_entity_move`, `shift_entity_create`, and `shift_entity_destroy` enqueue operations. Nothing takes effect until `shift_flush()`. For cases where you need entities live immediately, `_immediate` variants bypass the queue entirely.
 - **Generation revocation** — `shift_entity_revoke` bumps an entity's generation, invalidating all existing handles without destroying the entity.
@@ -84,15 +84,15 @@ Set `alignment` to a power-of-two value when the component will be processed wit
 
 The `user_data` pointer is stored as-is and retrievable via `shift_component_get_user_data`. Consumer layers can use it to attach type metadata, tag flags, custom copy semantics, or whatever else they need — keyed by component ID without maintaining parallel arrays.
 
-`constructor` and `destructor` follow the same signature pattern as all shift callbacks:
+`constructor` and `destructor` follow the same signature pattern as all shift callbacks, with an additional `user_data` parameter:
 
 ```c
 void my_ctor(shift_t *ctx, shift_collection_id_t col_id,
              const shift_entity_t *entities, void *data,
-             uint32_t offset, uint32_t count);
+             uint32_t offset, uint32_t count, void *user_data);
 ```
 
-They receive the context, collection, entity array, component column base pointer, offset into the arrays, and count. This lets you cross-reference other components or entity handles during init/teardown. They are called in batch during `shift_flush()` whenever entities enter or leave a collection that owns the component.
+They receive the context, collection, entity array, component column base pointer, offset into the arrays, count, and the opaque `user_data` pointer from the component's `shift_component_info_t`. This lets you cross-reference other components or entity handles during init/teardown, and access component metadata without an extra lookup. They are called in batch during `shift_flush()` whenever entities enter or leave a collection that owns the component.
 
 ### 3. Register collections
 
@@ -608,8 +608,9 @@ double-free gymnastics entirely:
 ```c
 static void fd_destructor(shift_t *ctx, shift_collection_id_t col_id,
                           const shift_entity_t *entities, void *data,
-                          uint32_t offset, uint32_t count) {
-    (void)ctx; (void)col_id; (void)entities;
+                          uint32_t offset, uint32_t count,
+                          void *user_data) {
+    (void)ctx; (void)col_id; (void)entities; (void)user_data;
     int *fds = (int *)data + offset;
     for (uint32_t i = 0; i < count; i++)
         if (fds[i] >= 0) close(fds[i]);

@@ -88,6 +88,7 @@ typedef void (*shift_collection_callback_t)(shift_t               *ctx,
  * @param data       Base pointer to this component's SoA column.
  * @param offset     Index of the first new slot in entities and data.
  * @param count      Number of contiguous slots to initialize.
+ * @param user_data  Opaque pointer from shift_component_info_t::user_data.
  *
  * Typical usage: MyType *p = (MyType *)data + offset;
  *
@@ -98,7 +99,8 @@ typedef void (*shift_component_ctor_t)(shift_t               *ctx,
                                        const shift_entity_t  *entities,
                                        void                  *data,
                                        uint32_t               offset,
-                                       uint32_t               count);
+                                       uint32_t               count,
+                                       void                  *user_data);
 
 /**
  * Component destructor — called in batch when entities leave a collection
@@ -110,6 +112,7 @@ typedef void (*shift_component_ctor_t)(shift_t               *ctx,
  * @param data       Base pointer to this component's SoA column.
  * @param offset     Index of the first slot being torn down.
  * @param count      Number of contiguous slots to tear down.
+ * @param user_data  Opaque pointer from shift_component_info_t::user_data.
  *
  * Typical usage: MyType *p = (MyType *)data + offset;
  *
@@ -120,7 +123,8 @@ typedef void (*shift_component_dtor_t)(shift_t               *ctx,
                                        const shift_entity_t  *entities,
                                        void                  *data,
                                        uint32_t               offset,
-                                       uint32_t               count);
+                                       uint32_t               count,
+                                       void                  *user_data);
 
 /* --------------------------------------------------------------------------
  * Allocator

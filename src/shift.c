@@ -960,7 +960,7 @@ shift_result_t shift_entity_create_immediate(shift_t              *ctx,
     shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
     if (ci->constructor)
       ci->constructor(ctx, dest_col_id, dest->entity_ids,
-                      dest->columns[c], dest_base, count);
+                      dest->columns[c], dest_base, count, ci->user_data);
   }
 
   /* Fire on_enter immediately. */
@@ -1057,7 +1057,8 @@ shift_result_t shift_entity_move_immediate(shift_t              *ctx,
       shift_component_info_t *ce = &ctx->components[e->comp_id];
       if (ce->destructor)
         ce->destructor(ctx, src_col_id, src->entity_ids,
-                       src->columns[e->col_idx], src_offset, 1);
+                       src->columns[e->col_idx], src_offset, 1,
+                       ce->user_data);
     }
 
     /* Fire on_leave (entity still addressable in src). */
@@ -1076,7 +1077,8 @@ shift_result_t shift_entity_move_immediate(shift_t              *ctx,
       shift_component_info_t *ce = &ctx->components[e->comp_id];
       if (ce->constructor)
         ce->constructor(ctx, dest_col_id, dest->entity_ids,
-                        dest->columns[e->col_idx], dest_base, 1);
+                        dest->columns[e->col_idx], dest_base, 1,
+                        ce->user_data);
     }
 
     /* Fire on_enter. */
@@ -1162,7 +1164,7 @@ shift_result_t shift_entity_create_begin(shift_t              *ctx,
     shift_component_info_t *ci = &ctx->components[dest->component_ids[c]];
     if (ci->constructor)
       ci->constructor(ctx, dest_col_id, dest->entity_ids,
-                      dest->columns[c], dest_base, count);
+                      dest->columns[c], dest_base, count, ci->user_data);
   }
 
   /* Remove from null pool immediately. */
@@ -1303,7 +1305,8 @@ static inline void flush_batch(shift_t *ctx, shift_batch_t *b) {
     shift_component_info_t *ce = &ctx->components[e->comp_id];
     if (ce->constructor)
       ce->constructor(ctx, dst_col_id, b->dst->entity_ids,
-                      b->dst->columns[e->col_idx], b->base, b->count);
+                      b->dst->columns[e->col_idx], b->base, b->count,
+                      ce->user_data);
   }
   b->recipe_idx = UINT32_MAX;
   b->dst        = NULL;
@@ -1527,7 +1530,8 @@ shift_result_t shift_flush(shift_t *ctx) {
       shift_component_info_t *ce = &ctx->components[e->comp_id];
       if (ce->destructor)
         ce->destructor(ctx, op->src_col_id, src->entity_ids,
-                       src->columns[e->col_idx], op->src_offset, op->count);
+                       src->columns[e->col_idx], op->src_offset, op->count,
+                       ce->user_data);
     }
 
     /*
