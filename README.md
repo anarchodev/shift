@@ -101,6 +101,7 @@ They receive the context, collection, entity array, component column base pointe
 shift_component_id_t moving_comps[] = {pos_id, vel_id};
 
 shift_collection_info_t col_info = {
+    .name         = "moving",
     .comp_ids     = moving_comps,
     .comp_count   = 2,
     .max_capacity = 0,       /* 0 = dynamic growth */
@@ -514,6 +515,41 @@ shift_result_t shift_flush(shift_t *ctx);
 ```
 
 Executes all queued operations in order: removes from source collections (calling `on_leave` / destructors), inserts into destination collections (calling constructors / `on_enter`). Consecutive contiguous operations targeting the same destination are merged into a single batch call.
+
+### Metrics
+
+```c
+shift_result_t shift_metrics_begin(shift_t *ctx);
+shift_result_t shift_metrics_end(shift_t *ctx, const shift_metrics_t **out);
+```
+
+Optional per-tick instrumentation. Bracket your application loop with `shift_metrics_begin` / `shift_metrics_end` to track the high water mark of entity count in each collection during that tick. Zero overhead when not used — the metrics struct is only allocated on first call.
+
+```c
+/* At the top of your loop */
+shift_metrics_begin(ctx);
+
+/* ... game logic, creates, moves, destroys, flushes ... */
+
+/* At the end of your loop */
+const shift_metrics_t *met;
+shift_metrics_end(ctx, &met);
+
+/* Iterate collections (skip 0, the internal null collection) */
+for (size_t i = 1; i < met->collection_capacity; i++) {
+    if (met->collections[i].name)
+        printf("%-20s max_count=%zu\n",
+               met->collections[i].name,
+               met->collections[i].max_count);
+}
+```
+
+The returned pointer is valid until the next `shift_metrics_begin` or `shift_context_destroy`. Each `shift_collection_metrics_t` contains:
+
+| Field       | Description                                              |
+|-------------|----------------------------------------------------------|
+| `name`      | The human-readable name from collection registration     |
+| `max_count` | Highest entity count observed in the collection this tick |
 
 
 ## Recommended Usage

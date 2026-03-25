@@ -85,7 +85,7 @@ void test_collection_register(void) {
 
   shift_collection_id_t col_id;
   shift_result_t        r = shift_collection_register(
-      ctx, &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
       &col_id);
   TEST_ASSERT_EQUAL_INT(shift_ok, r);
 
@@ -107,19 +107,19 @@ void test_collection_register_sequential_ids(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &id0));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &id1));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &id2));
 
   /* IDs are sequential starting at 1 (0 is reserved for the null collection) */
@@ -142,7 +142,7 @@ void test_entity_create(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -184,7 +184,7 @@ void test_create_flush_get_component(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -224,7 +224,7 @@ void test_get_component_before_flush(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -258,7 +258,7 @@ void test_destroy_flush_stale(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -292,7 +292,7 @@ void test_multi_destroy_swap_remove(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t *ep;
@@ -349,13 +349,13 @@ void test_move_flush(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = col0_comps, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = col0_comps, .comp_count = 1},
           &col0_id));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = col1_comps, .comp_count = 2},
+          &(shift_collection_info_t){.name = "test", .comp_ids = col1_comps, .comp_count = 2},
           &col1_id));
 
   shift_entity_t e;
@@ -437,7 +437,7 @@ void test_destructor_called(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t *ep;
@@ -474,7 +474,7 @@ void test_destroy_run_batches_destructor(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t *ep;
@@ -519,7 +519,7 @@ void test_create_run_batches_constructor(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t *ep;
@@ -551,7 +551,7 @@ void test_entity_alloc_move_to_null(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -600,7 +600,7 @@ void test_max_collections_unaffected(void) {
         shift_ok,
         shift_collection_register(
             ctx,
-            &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+            &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
             &col_id));
   }
 
@@ -610,7 +610,7 @@ void test_max_collections_unaffected(void) {
       shift_error_full,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &extra_id));
 
   shift_context_destroy(ctx);
@@ -652,7 +652,7 @@ void test_collection_on_enter_on_leave(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_enter(ctx, col_id,
@@ -689,7 +689,7 @@ void test_entity_create_one_consecutive(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   /* First two creates yield consecutive front-to-back indices. */
@@ -722,7 +722,7 @@ void test_entity_create_one_consecutive(void) {
       shift_ok,
       shift_collection_register(
           ctx2,
-          &(shift_collection_info_t){.comp_ids = &comp_id2, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id2, .comp_count = 1},
           &col_id2));
   shift_entity_t e3;
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx2, col_id2, &e3));
@@ -742,7 +742,7 @@ void test_entity_create_batch(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   /* count=0 is invalid */
@@ -788,7 +788,7 @@ void test_move_batch_null_args(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -814,7 +814,7 @@ void test_move_batch_zero_count(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -840,13 +840,13 @@ void test_move_batch_basic(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_src_id));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t *ep;
@@ -886,7 +886,7 @@ void test_move_batch_peek_fires(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   /* Source collection uses a separate component (no constructor) so that
@@ -900,7 +900,7 @@ void test_move_batch_peek_fires(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_src, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_src, .comp_count = 1},
           &col_src_id));
 
   shift_entity_t *ep;
@@ -932,7 +932,7 @@ void test_move_batch_stale(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t *ep;
@@ -962,17 +962,17 @@ void test_move_batch_multi_source(void) {
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
-          ctx, &(shift_collection_info_t){.comp_ids = &comp_a, .comp_count = 1},
+          ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp_a, .comp_count = 1},
           &col0_id));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
-          ctx, &(shift_collection_info_t){.comp_ids = &comp_a, .comp_count = 1},
+          ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp_a, .comp_count = 1},
           &col1_id));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
-          ctx, &(shift_collection_info_t){.comp_ids = &comp_a, .comp_count = 1},
+          ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp_a, .comp_count = 1},
           &col2_id));
 
   /* Place two entities in col 0, two in col 1. */
@@ -1050,7 +1050,7 @@ void test_flush_noncontiguous_removes(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t *ep;
@@ -1126,7 +1126,7 @@ void test_fixed_capacity_basic(void) {
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_register(
                             ctx,
-                            &(shift_collection_info_t){.comp_ids    = &comp_id,
+                            &(shift_collection_info_t){.name = "test", .comp_ids    = &comp_id,
                                                        .comp_count  = 1,
                                                        .max_capacity = 4},
                             &col_id));
@@ -1160,12 +1160,12 @@ void test_fixed_capacity_overflow(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &src_id));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(ctx,
-                                &(shift_collection_info_t){.comp_ids     = &comp_id,
+                                &(shift_collection_info_t){.name = "test", .comp_ids     = &comp_id,
                                                            .comp_count   = 1,
                                                            .max_capacity = 2},
                                 &dst_id));
@@ -1213,7 +1213,7 @@ void test_fixed_capacity_eager_alloc(void) {
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(ctx,
-                                &(shift_collection_info_t){.comp_ids     = &comp_id,
+                                &(shift_collection_info_t){.name = "test", .comp_ids     = &comp_id,
                                                            .comp_count   = 1,
                                                            .max_capacity = 4},
                                 &col_id));
@@ -1272,7 +1272,7 @@ void test_recipe_cache_no_dangling_ptr(void) {
         shift_ok,
         shift_collection_register(
             ctx,
-            &(shift_collection_info_t){.comp_ids   = &comp_id,
+            &(shift_collection_info_t){.name = "test", .comp_ids   = &comp_id,
                                        .comp_count = 1},
             &src_ids[s]));
   }
@@ -1280,7 +1280,7 @@ void test_recipe_cache_no_dangling_ptr(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &dst_id));
 
   /* Create one entity per source collection and flush them into the sources. */
@@ -1336,14 +1336,14 @@ void test_flush_error_state_reset(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &src_id));
   /* cap-2 destination — cannot hold 3 entities */
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids     = &comp_id,
+          &(shift_collection_info_t){.name = "test", .comp_ids     = &comp_id,
                                      .comp_count   = 1,
                                      .max_capacity = 2},
           &dst_id));
@@ -1396,13 +1396,13 @@ void test_entity_move_batch_partial_stale_no_side_effects(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_src));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_dst));
 
   shift_entity_t *ep;
@@ -1459,7 +1459,7 @@ void test_on_leave_can_access_source_component(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_src));
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_leave(ctx, col_src,
@@ -1470,7 +1470,7 @@ void test_on_leave_can_access_source_component(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_dst));
 
   shift_entity_t e;
@@ -1508,7 +1508,7 @@ void test_collection_register_duplicate_component(void) {
       shift_error_invalid,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = dup_comps, .comp_count = 2},
+          &(shift_collection_info_t){.name = "test", .comp_ids = dup_comps, .comp_count = 2},
           &col_id));
 
   shift_context_destroy(ctx);
@@ -1525,7 +1525,7 @@ void test_empty_collection_register(void) {
   shift_collection_id_t col_id;
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
-      shift_collection_register(ctx, &(shift_collection_info_t){0}, &col_id));
+      shift_collection_register(ctx, &(shift_collection_info_t){.name = "test"}, &col_id));
 
   /* Collection exists and starts empty. */
   shift_entity_t *ents  = NULL;
@@ -1545,10 +1545,10 @@ void test_empty_collection_create_move_destroy(void) {
   shift_collection_id_t col_a, col_b;
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
-      shift_collection_register(ctx, &(shift_collection_info_t){0}, &col_a));
+      shift_collection_register(ctx, &(shift_collection_info_t){.name = "test"}, &col_a));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
-      shift_collection_register(ctx, &(shift_collection_info_t){0}, &col_b));
+      shift_collection_register(ctx, &(shift_collection_info_t){.name = "test"}, &col_b));
 
   shift_entity_t e;
   TEST_ASSERT_EQUAL_INT(shift_ok, shift_entity_create_one(ctx, col_a, &e));
@@ -1664,7 +1664,7 @@ void test_immediate_create(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_enter(ctx, col_id,
@@ -1714,7 +1714,7 @@ void test_immediate_create_batch(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_enter(ctx, col_id,
@@ -1754,7 +1754,7 @@ void test_immediate_move(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_a, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_a, .comp_count = 1},
           &col_src));
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_leave(ctx, col_src,
@@ -1764,7 +1764,7 @@ void test_immediate_move(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids  = dst_comps, .comp_count = 2},
+          &(shift_collection_info_t){.name = "test", .comp_ids  = dst_comps, .comp_count = 2},
           &col_dst));
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_enter(ctx, col_dst,
@@ -1829,7 +1829,7 @@ void test_immediate_destroy(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
   TEST_ASSERT_EQUAL_INT(shift_ok,
                         shift_collection_on_leave(ctx, col_id,
@@ -1872,13 +1872,13 @@ void test_immediate_op_with_pending_deferred_returns_error(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_a));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_b));
 
   shift_entity_t e;
@@ -1917,7 +1917,7 @@ void test_revoke_basic(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_id));
 
   shift_entity_t e;
@@ -1975,13 +1975,13 @@ void test_revoke_pending_move_entity(void) {
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_a));
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
           ctx,
-          &(shift_collection_info_t){.comp_ids = &comp_id, .comp_count = 1},
+          &(shift_collection_info_t){.name = "test", .comp_ids = &comp_id, .comp_count = 1},
           &col_b));
 
   shift_entity_t e;
@@ -2020,19 +2020,19 @@ void test_convenience_add_functions(void) {
   /* shift_collection_add_of — collection 0 is the null pool, so first
    * user-registered collection is 1. */
   shift_collection_id_t col =
-      shift_collection_add_of(ctx, &err, pos, vel);
+      shift_collection_add_of(ctx, "col", &err, pos, vel);
   TEST_ASSERT_EQUAL_INT(shift_ok, err);
   TEST_ASSERT_NOT_EQUAL(0, col);
 
   /* shift_collection_add_empty */
-  shift_collection_id_t empty = shift_collection_add_empty(ctx, &err);
+  shift_collection_id_t empty = shift_collection_add_empty(ctx, "empty", &err);
   TEST_ASSERT_EQUAL_INT(shift_ok, err);
   TEST_ASSERT_NOT_EQUAL(0, empty);
 
   /* shift_collection_add with explicit array */
   shift_component_id_t arr[] = {pos, hp};
   shift_collection_id_t col2 =
-      shift_collection_add(ctx, 2, arr, &err);
+      shift_collection_add(ctx, "col2", 2, arr, &err);
   TEST_ASSERT_EQUAL_INT(shift_ok, err);
   TEST_ASSERT_NOT_EQUAL(0, col2);
 
@@ -2604,7 +2604,7 @@ void test_alignment_basic(void) {
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
-          ctx, &(shift_collection_info_t){.comp_ids = &comp, .comp_count = 1},
+          ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
           &col));
 
   /* Create entities to force allocation. */
@@ -2638,7 +2638,7 @@ void test_alignment_survives_grow(void) {
   TEST_ASSERT_EQUAL_INT(
       shift_ok,
       shift_collection_register(
-          ctx, &(shift_collection_info_t){.comp_ids = &comp, .comp_count = 1},
+          ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
           &col));
 
   /* Create enough entities to trigger multiple grow cycles (8 -> 16 -> 32). */
@@ -2658,6 +2658,187 @@ void test_alignment_survives_grow(void) {
   arr[19][0] = 2.0f;
   TEST_ASSERT_EQUAL_FLOAT(1.0f, arr[0][0]);
   TEST_ASSERT_EQUAL_FLOAT(2.0f, arr[19][0]);
+
+  shift_context_destroy(ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * Metrics tests
+ * -------------------------------------------------------------------------- */
+
+void test_metrics_begin_end_noop(void) {
+  shift_t *ctx = make_ctx();
+  shift_component_id_t comp;
+  shift_component_register(ctx,
+                           &(shift_component_info_t){.element_size = sizeof(int)},
+                           &comp);
+  shift_collection_id_t col;
+  shift_collection_register(
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
+      &col);
+
+  /* Create 3 entities before the tick. */
+  shift_entity_t *ents;
+  shift_entity_create(ctx, 3, col, &ents);
+  shift_flush(ctx);
+
+  const shift_metrics_t *met = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_begin(ctx));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_end(ctx, &met));
+  TEST_ASSERT_NOT_NULL(met);
+
+  /* No ops — max_count should equal initial snapshot. */
+  TEST_ASSERT_EQUAL_size_t(3, met->collections[col].max_count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_metrics_create_flush(void) {
+  shift_t *ctx = make_ctx();
+  shift_component_id_t comp;
+  shift_component_register(ctx,
+                           &(shift_component_info_t){.element_size = sizeof(int)},
+                           &comp);
+  shift_collection_id_t col;
+  shift_collection_register(
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
+      &col);
+
+  const shift_metrics_t *met = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_begin(ctx));
+
+  shift_entity_t *ents;
+  shift_entity_create(ctx, 5, col, &ents);
+  shift_flush(ctx);
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_end(ctx, &met));
+  TEST_ASSERT_EQUAL_size_t(5, met->collections[col].max_count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_metrics_immediate_create(void) {
+  shift_t *ctx = make_ctx();
+  shift_component_id_t comp;
+  shift_component_register(ctx,
+                           &(shift_component_info_t){.element_size = sizeof(int)},
+                           &comp);
+  shift_collection_id_t col;
+  shift_collection_register(
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
+      &col);
+
+  const shift_metrics_t *met = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_begin(ctx));
+
+  shift_entity_t e;
+  shift_entity_create_one_immediate(ctx, col, &e);
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_end(ctx, &met));
+  TEST_ASSERT_EQUAL_size_t(1, met->collections[col].max_count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_metrics_move_tracks_dest_max(void) {
+  shift_t *ctx = make_ctx();
+  shift_component_id_t comp;
+  shift_component_register(ctx,
+                           &(shift_component_info_t){.element_size = sizeof(int)},
+                           &comp);
+  shift_collection_id_t col_a, col_b;
+  shift_collection_register(
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
+      &col_a);
+  shift_collection_register(
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
+      &col_b);
+
+  /* Pre-populate col_a. */
+  shift_entity_t *ents;
+  shift_entity_create(ctx, 4, col_a, &ents);
+  shift_flush(ctx);
+  shift_entity_t e0 = ents[0];
+  shift_entity_t e1 = ents[1];
+
+  const shift_metrics_t *met = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_begin(ctx));
+
+  /* Move 2 from col_a to col_b. */
+  shift_entity_move_one(ctx, e0, col_b);
+  shift_entity_move_one(ctx, e1, col_b);
+  shift_flush(ctx);
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_end(ctx, &met));
+
+  /* col_a started at 4 — that remains the max even though it dropped to 2. */
+  TEST_ASSERT_EQUAL_size_t(4, met->collections[col_a].max_count);
+  /* col_b gained 2. */
+  TEST_ASSERT_EQUAL_size_t(2, met->collections[col_b].max_count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_metrics_multiple_flushes(void) {
+  shift_t *ctx = make_ctx();
+  shift_component_id_t comp;
+  shift_component_register(ctx,
+                           &(shift_component_info_t){.element_size = sizeof(int)},
+                           &comp);
+  shift_collection_id_t col;
+  shift_collection_register(
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
+      &col);
+
+  const shift_metrics_t *met = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_begin(ctx));
+
+  shift_entity_t *e1;
+  shift_entity_create(ctx, 2, col, &e1);
+  shift_flush(ctx);
+
+  shift_entity_t *e2;
+  shift_entity_create(ctx, 3, col, &e2);
+  shift_flush(ctx);
+
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_end(ctx, &met));
+  TEST_ASSERT_EQUAL_size_t(5, met->collections[col].max_count);
+
+  shift_context_destroy(ctx);
+}
+
+void test_metrics_end_without_begin(void) {
+  shift_t *ctx = make_ctx();
+  const shift_metrics_t *met = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_error_invalid, shift_metrics_end(ctx, &met));
+  shift_context_destroy(ctx);
+}
+
+void test_metrics_not_active_outside_tick(void) {
+  shift_t *ctx = make_ctx();
+  shift_component_id_t comp;
+  shift_component_register(ctx,
+                           &(shift_component_info_t){.element_size = sizeof(int)},
+                           &comp);
+  shift_collection_id_t col;
+  shift_collection_register(
+      ctx, &(shift_collection_info_t){.name = "test", .comp_ids = &comp, .comp_count = 1},
+      &col);
+
+  /* Begin and end a tick. */
+  const shift_metrics_t *met = NULL;
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_begin(ctx));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_end(ctx, &met));
+
+  /* Operations outside the tick should not inflate the next tick's max. */
+  shift_entity_t *ents;
+  shift_entity_create(ctx, 5, col, &ents);
+  shift_flush(ctx);
+
+  /* New tick — max should reflect the 5 entities already present. */
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_begin(ctx));
+  TEST_ASSERT_EQUAL_INT(shift_ok, shift_metrics_end(ctx, &met));
+  TEST_ASSERT_EQUAL_size_t(5, met->collections[col].max_count);
 
   shift_context_destroy(ctx);
 }
@@ -2739,5 +2920,12 @@ int main(void) {
   RUN_TEST(test_collection_reserve_fixed_cap);
   RUN_TEST(test_alignment_basic);
   RUN_TEST(test_alignment_survives_grow);
+  RUN_TEST(test_metrics_begin_end_noop);
+  RUN_TEST(test_metrics_create_flush);
+  RUN_TEST(test_metrics_immediate_create);
+  RUN_TEST(test_metrics_move_tracks_dest_max);
+  RUN_TEST(test_metrics_multiple_flushes);
+  RUN_TEST(test_metrics_end_without_begin);
+  RUN_TEST(test_metrics_not_active_outside_tick);
   return UNITY_END();
 }

@@ -173,6 +173,21 @@ typedef struct shift_deferred_op_s      shift_deferred_op_t;
 typedef struct shift_migration_recipe_s shift_migration_recipe_t;
 
 /* --------------------------------------------------------------------------
+ * Metrics (per-tick instrumentation)
+ * -------------------------------------------------------------------------- */
+
+typedef struct {
+  const char *name;      /* borrowed from collection registration */
+  size_t      max_count; /* high water mark of entity count during the tick */
+} shift_collection_metrics_t;
+
+typedef struct {
+  shift_collection_metrics_t *collections;         /* [collection_capacity] */
+  size_t                      collection_capacity;
+  bool                        active;
+} shift_metrics_t;
+
+/* --------------------------------------------------------------------------
  * Per-entity metadata
  * -------------------------------------------------------------------------- */
 
@@ -209,6 +224,7 @@ struct shift_s {
   size_t                    migration_recipe_count;
   size_t                    migration_recipe_capacity;
   uint32_t                  next_handler_id;
+  shift_metrics_t          *metrics; /* NULL when metrics not active */
 };
 
 /* --------------------------------------------------------------------------
@@ -292,6 +308,7 @@ shift_result_t shift_component_get_collections(
  * -------------------------------------------------------------------------- */
 
 typedef struct {
+  const char                 *name;         /* required, human-readable label */
   const shift_component_id_t *comp_ids;
   size_t                      comp_count;
   size_t                      max_capacity; /* leave 0 for dynamic */
@@ -725,6 +742,30 @@ shift_result_t shift_entity_revoke(shift_t        *ctx,
 shift_result_t shift_flush(shift_t *ctx);
 
 /* --------------------------------------------------------------------------
+ * Metrics
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Begin a metrics tick.  Allocates on first call, zeroes counters, and
+ * snapshots current collection entity counts as the initial max_count.
+ *
+ * @param ctx  The shift context.
+ * @return shift_ok, shift_error_null, or shift_error_oom.
+ */
+shift_result_t shift_metrics_begin(shift_t *ctx);
+
+/**
+ * End a metrics tick.  The returned pointer remains valid until the next
+ * shift_metrics_begin or shift_context_destroy.
+ *
+ * @param ctx  The shift context.
+ * @param out  Receives a read-only pointer to the metrics snapshot.
+ * @return shift_ok, shift_error_null, or shift_error_invalid (if no tick
+ *         was begun).
+ */
+shift_result_t shift_metrics_end(shift_t *ctx, const shift_metrics_t **out);
+
+/* --------------------------------------------------------------------------
  * Collection introspection
  * -------------------------------------------------------------------------- */
 
@@ -749,6 +790,16 @@ static inline size_t shift_collection_count(const shift_t *ctx) {
  */
 size_t shift_collection_entity_count(const shift_t         *ctx,
                                      shift_collection_id_t  col_id);
+
+/**
+ * Get the human-readable name of a collection.
+ *
+ * @param ctx     The shift context.
+ * @param col_id  Target collection.
+ * @return The name string, or NULL if ctx is NULL or col_id is out of range.
+ */
+const char *shift_collection_get_name(const shift_t         *ctx,
+                                      shift_collection_id_t  col_id);
 
 /**
  * Get the sorted component ID list for a collection.
@@ -877,11 +928,12 @@ shift_component_add_ex(shift_t *ctx, size_t element_size,
  * @return The assigned collection ID (0 on failure).
  */
 static inline shift_collection_id_t
-shift_collection_add(shift_t *ctx, size_t comp_count,
+shift_collection_add(shift_t *ctx, const char *name, size_t comp_count,
                      const shift_component_id_t *comp_ids,
                      shift_result_t *err) {
   shift_collection_id_t   id = 0;
-  shift_collection_info_t info = {.comp_ids   = comp_ids,
+  shift_collection_info_t info = {.name       = name,
+                                  .comp_ids   = comp_ids,
                                   .comp_count = comp_count};
   shift_result_t          r = shift_collection_register(ctx, &info, &id);
   if (err)
@@ -898,9 +950,10 @@ shift_collection_add(shift_t *ctx, size_t comp_count,
  * @return The assigned collection ID (0 on failure).
  */
 static inline shift_collection_id_t
-shift_collection_add_empty(shift_t *ctx, shift_result_t *err) {
+shift_collection_add_empty(shift_t *ctx, const char *name,
+                           shift_result_t *err) {
   shift_collection_id_t   id = 0;
-  shift_collection_info_t info = {0};
+  shift_collection_info_t info = {.name = name};
   shift_result_t          r = shift_collection_register(ctx, &info, &id);
   if (err)
     *err = r;
@@ -908,9 +961,9 @@ shift_collection_add_empty(shift_t *ctx, shift_result_t *err) {
 }
 
 /** Register a collection with inline varargs component IDs. */
-#define shift_collection_add_of(ctx, err, ...)                                 \
+#define shift_collection_add_of(ctx, name, err, ...)                           \
   shift_collection_add(                                                        \
-      (ctx),                                                                   \
+      (ctx), (name),                                                           \
       sizeof((shift_component_id_t[]){__VA_ARGS__}) /                          \
           sizeof(shift_component_id_t),                                        \
       (shift_component_id_t[]){__VA_ARGS__}, (err))
@@ -935,34 +988,38 @@ shift_collection_add_empty(shift_t *ctx, shift_result_t *err) {
                                 .destructor   = (dtor)},                      \
       &(name))
 
-/** Declares shift_collection_id_t NAME and registers with listed components. */
-#define SHIFT_COLLECTION(ctx, name, ...)                                      \
-  shift_collection_id_t name;                                                 \
+/** Declares shift_collection_id_t VAR and registers with listed components.
+ *  The collection name is automatically set to the stringified variable name. */
+#define SHIFT_COLLECTION(ctx, var, ...)                                       \
+  shift_collection_id_t var;                                                  \
   do {                                                                        \
     shift_component_id_t _comps[] = {__VA_ARGS__};                            \
     shift_collection_register(                                                \
         (ctx),                                                                \
         &(shift_collection_info_t){                                           \
+            .name       = #var,                                               \
             .comp_ids   = _comps,                                             \
             .comp_count = sizeof(_comps) / sizeof(_comps[0])},                \
-        &(name));                                                             \
+        &(var));                                                              \
   } while (0)
 
 /** Like SHIFT_COLLECTION but with a fixed max_capacity. */
-#define SHIFT_COLLECTION_CAP(ctx, name, cap, ...)                             \
-  shift_collection_id_t name;                                                 \
+#define SHIFT_COLLECTION_CAP(ctx, var, cap, ...)                              \
+  shift_collection_id_t var;                                                  \
   do {                                                                        \
     shift_component_id_t _comps[] = {__VA_ARGS__};                            \
     shift_collection_register(                                                \
         (ctx),                                                                \
         &(shift_collection_info_t){                                           \
+            .name         = #var,                                             \
             .comp_ids     = _comps,                                           \
             .comp_count   = sizeof(_comps) / sizeof(_comps[0]),               \
             .max_capacity = (cap)},                                           \
-        &(name));                                                             \
+        &(var));                                                              \
   } while (0)
 
 /** Zero-component collection (state marker / staging area). */
-#define SHIFT_COLLECTION_EMPTY(ctx, name)                                     \
-  shift_collection_id_t name;                                                 \
-  shift_collection_register((ctx), &(shift_collection_info_t){0}, &(name))
+#define SHIFT_COLLECTION_EMPTY(ctx, var)                                      \
+  shift_collection_id_t var;                                                  \
+  shift_collection_register(                                                  \
+      (ctx), &(shift_collection_info_t){.name = #var}, &(var))

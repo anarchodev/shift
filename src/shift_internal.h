@@ -75,6 +75,7 @@ typedef struct {
  * -------------------------------------------------------------------------- */
 
 typedef struct shift_collection_entry_s {
+  const char           *name;         /* borrowed pointer, user owns lifetime */
   size_t                count;
   size_t                capacity;
   size_t                max_capacity;

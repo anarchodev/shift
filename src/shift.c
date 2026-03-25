@@ -233,6 +233,7 @@ shift_result_t shift_context_create(const shift_config_t *config,
          sizeof(shift_collection_entry_t) * ctx->max_collections);
 
   /* Null collection occupies collections[0]: permanent free-slot pool */
+  ctx->collections[0].name            = "null";
   ctx->collections[0].component_count = 0;
   ctx->collections[0].component_ids   = NULL;
   ctx->collections[0].columns         = NULL;
@@ -340,6 +341,12 @@ void shift_context_destroy(shift_t *ctx) {
     sfree(ctx, ctx->comp_collections);
   }
 
+  if (ctx->metrics) {
+    if (ctx->metrics->collections)
+      sfree(ctx, ctx->metrics->collections);
+    sfree(ctx, ctx->metrics);
+  }
+
   sfree(ctx, ctx->max_src_offset);
   sfree(ctx, ctx->deferred_queue);
   sfree(ctx, ctx->collections);
@@ -349,6 +356,67 @@ void shift_context_destroy(shift_t *ctx) {
   /* Free the context struct itself using a local copy of the allocator */
   shift_allocator_t alloc = ctx->allocator;
   alloc.free(ctx, alloc.ctx);
+}
+
+/* --------------------------------------------------------------------------
+ * Metrics
+ * -------------------------------------------------------------------------- */
+
+static inline void metrics_update_max(shift_t *ctx,
+                                       shift_collection_id_t col_id) {
+  shift_metrics_t *m = ctx->metrics;
+  if (!m || !m->active)
+    return;
+  if (col_id < m->collection_capacity) {
+    size_t cur = ctx->collections[col_id].count;
+    if (cur > m->collections[col_id].max_count)
+      m->collections[col_id].max_count = cur;
+  }
+}
+
+shift_result_t shift_metrics_begin(shift_t *ctx) {
+  if (!ctx)
+    return shift_error_null;
+
+  if (!ctx->metrics) {
+    shift_metrics_t *met = salloc(ctx, sizeof(shift_metrics_t));
+    if (!met)
+      return shift_error_oom;
+    memset(met, 0, sizeof(shift_metrics_t));
+
+    met->collection_capacity = ctx->max_collections;
+    met->collections = salloc(
+        ctx, sizeof(shift_collection_metrics_t) * met->collection_capacity);
+    if (!met->collections) {
+      sfree(ctx, met);
+      return shift_error_oom;
+    }
+    ctx->metrics = met;
+  }
+
+  shift_metrics_t *met = ctx->metrics;
+  memset(met->collections, 0,
+         sizeof(shift_collection_metrics_t) * met->collection_capacity);
+
+  /* Snapshot current counts as initial max and copy names. */
+  for (size_t i = 0; i < ctx->collection_count; i++) {
+    met->collections[i].name      = ctx->collections[i].name;
+    met->collections[i].max_count = ctx->collections[i].count;
+  }
+
+  met->active = true;
+  return shift_ok;
+}
+
+shift_result_t shift_metrics_end(shift_t *ctx, const shift_metrics_t **out) {
+  if (!ctx || !out)
+    return shift_error_null;
+  if (!ctx->metrics || !ctx->metrics->active)
+    return shift_error_invalid;
+
+  ctx->metrics->active = false;
+  *out = ctx->metrics;
+  return shift_ok;
 }
 
 /* --------------------------------------------------------------------------
@@ -401,6 +469,8 @@ shift_result_t shift_collection_register(shift_t                       *ctx,
                                          shift_collection_id_t *out_id) {
   if (!ctx || !info || !out_id)
     return shift_error_null;
+  if (!info->name)
+    return shift_error_null;
   if (info->comp_count > 0 && !info->comp_ids)
     return shift_error_null;
   if (ctx->collection_count >= ctx->max_collections)
@@ -415,6 +485,7 @@ shift_result_t shift_collection_register(shift_t                       *ctx,
   shift_collection_id_t     id  = (shift_collection_id_t)ctx->collection_count;
   shift_collection_entry_t *col = &ctx->collections[id];
   memset(col, 0, sizeof(*col));
+  col->name            = info->name;
   col->component_count = (uint32_t)info->comp_count;
   col->max_capacity    = info->max_capacity;
 
@@ -577,6 +648,13 @@ size_t shift_collection_entity_count(const shift_t         *ctx,
   if (!ctx || col_id >= ctx->collection_count)
     return 0;
   return ctx->collections[col_id].count;
+}
+
+const char *shift_collection_get_name(const shift_t         *ctx,
+                                      shift_collection_id_t  col_id) {
+  if (!ctx || col_id >= ctx->collection_count)
+    return NULL;
+  return ctx->collections[col_id].name;
 }
 
 shift_result_t shift_collection_get_components(
@@ -965,6 +1043,7 @@ shift_result_t shift_entity_create_immediate(shift_t              *ctx,
 
   ctx->null_front += count;
   dest->count     += count;
+  metrics_update_max(ctx, dest_col_id);
 
   /* Call constructors eagerly. */
   for (uint32_t c = 0; c < dest->component_count; c++) {
@@ -1081,6 +1160,7 @@ shift_result_t shift_entity_move_immediate(shift_t              *ctx,
     m->col_id = dest_col_id;
     m->offset = dest_base;
     dest->count++;
+    metrics_update_max(ctx, dest_col_id);
 
     /* Call constructors for new components. */
     for (uint32_t c = 0; c < recipe->construct_count; c++) {
@@ -1237,6 +1317,7 @@ shift_result_t shift_entity_create_end(shift_t              *ctx,
 
   col->count       += count;
   col->begun_count -= count;
+  metrics_update_max(ctx, col_id);
 
   /* Fire on_enter now that entities are fully visible. */
   handler_list_fire(&col->on_enter_handlers, ctx, col_id,
@@ -1586,6 +1667,7 @@ shift_result_t shift_flush(shift_t *ctx) {
                       dst->entity_ids, dest_base, op->count);
 
     dst->count += op->count;
+    metrics_update_max(ctx, dst_col_id);
     batch.count += op->count;
     col_remove_run(ctx, src, op->src_offset, op->count);
   }
